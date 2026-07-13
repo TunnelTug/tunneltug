@@ -42,3 +42,6 @@ coverage.html
 # Env files (may contain secrets)
 .env
 .env.*
+# Local publish scratch
+.publish-modules/
+

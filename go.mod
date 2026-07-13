@@ -3,11 +3,11 @@ module tunneltug
 go 1.25.10
 
 require (
-	github.com/0TrustCloud/mesh_client v0.0.0
+	github.com/0TrustCloud/mesh_client v0.1.4
 	github.com/0TrustCloud/secure_data_format v1.0.0
-	github.com/0TrustCloud/secure_dns v1.0.1
-	github.com/0TrustCloud/secure_registrar v1.0.0
-	github.com/0TrustCloud/ultimate_db v1.3.5
+	github.com/0TrustCloud/secure_dns v1.0.3
+	github.com/0TrustCloud/secure_registrar v1.0.1
+	github.com/0TrustCloud/ultimate_db v1.3.6
 	github.com/hashicorp/yamux v0.1.2
 	github.com/quic-go/quic-go v0.59.1
 	golang.org/x/crypto v0.53.0
@@ -17,41 +17,15 @@ require (
 	k8s.io/client-go v0.32.3
 )
 
-replace github.com/0TrustCloud/mesh_client => ../0TrustCloud/modules/mesh_client
-
-replace github.com/0TrustCloud/secure_ssh => ../0TrustCloud/modules/secure_ssh
-
-replace github.com/0TrustCloud/secure_k8s => ../0TrustCloud/modules/secure_k8s
-
-replace github.com/0TrustCloud/secure_network => ../0TrustCloud/modules/secure_network
-
-replace github.com/0TrustCloud/secure_policy => ../0TrustCloud/modules/secure_policy
-
-replace github.com/0TrustCloud/secure_data_format => ../0TrustCloud/modules/secure_data_format
-
-replace github.com/0TrustCloud/secure_dns => ../0TrustCloud/modules/secure_dns
-
-replace github.com/0TrustCloud/secure_registrar => ../0TrustCloud/modules/secure_registrar
-
-replace github.com/0TrustCloud/ultimate_db => ../0TrustCloud/modules/ultimate_db
-
-replace github.com/0TrustCloud/logger => ../0TrustCloud/modules/logger
-
-replace github.com/0TrustCloud/auth_provider => ../0TrustCloud/modules/auth_provider
-
-replace github.com/0TrustCloud/guikit => ../0TrustCloud/modules/guikit
-
-replace github.com/0TrustCloud/samln => ../0TrustCloud/modules/samln
-
 require (
-	github.com/0TrustCloud/auth_provider v1.0.1 // indirect
+	github.com/0TrustCloud/auth_provider v1.0.5 // indirect
 	github.com/0TrustCloud/guikit v1.1.3-0.20260530040829-bb3a7bb56546 // indirect
 	github.com/0TrustCloud/logger v1.0.3 // indirect
-	github.com/0TrustCloud/samln v0.0.0 // indirect
-	github.com/0TrustCloud/secure_k8s v0.0.0 // indirect
-	github.com/0TrustCloud/secure_network v1.1.4 // indirect
+	github.com/0TrustCloud/samln v1.0.5 // indirect
+	github.com/0TrustCloud/secure_k8s v0.1.4 // indirect
+	github.com/0TrustCloud/secure_network v1.1.6 // indirect
 	github.com/0TrustCloud/secure_policy v1.0.6 // indirect
-	github.com/0TrustCloud/secure_ssh v0.0.0 // indirect
+	github.com/0TrustCloud/secure_ssh v0.1.2 // indirect
 	github.com/boombuler/barcode v1.0.1-0.20190219062509-6c824513bacc // indirect
 	github.com/creack/pty v1.1.24 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect

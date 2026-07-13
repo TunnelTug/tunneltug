@@ -1,0 +1,34 @@
+# Product vhost edge for TunnelTug server/lb modes.
+# Use with:  tunneltug -mode server -prod -domain tunneltug.com -vhosts config/vhosts.yaml ...
+# Or set TUNNELTUG_VHOSTS=/path/to/vhosts.yaml
+#
+# Apex/www (and optional single-label wildcards) reverse-proxy to local apps.
+# User tunnel subdomains (myapp.tunneltug.com) still route through the QUIC tunnel
+# when wildcard_subdomains is false (the default for tunnel product domains).
+
+platform_url: https://0trust.cloud
+platform_upstream: https://0trust.cloud
+cloud_domain: 0trust.cloud
+# Optional private backhaul for cloud:// upstreams:
+# cloud_backhaul: "http://206.189.239.120"
+
+acme_domains:
+  - tunneltug.com
+
+vhosts:
+  - domain: tunneltug.com
+    upstream: http://127.0.0.1:3082
+    auth_proxy: false
+    # Keep false so myapp.tunneltug.com stays a tunnel, not this upstream.
+    wildcard_subdomains: false
+
+  # Example CMS product with customer subdomains:
+  # - domain: motionkb.com
+  #   upstream: http://127.0.0.1:3090
+  #   auth_proxy: false
+  #   wildcard_subdomains: true
+
+  # Proxy platform control plane via private backhaul:
+  # - domain: servicekeys.io
+  #   upstream: "cloud://8443"
+  #   auth_proxy: true

@@ -1,0 +1,44 @@
+# Binaries
+/tunneltug
+/tunneltug.exe
+/tunneltug.exe~
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Build artifacts
+/dist/
+/bin/
+/build/
+
+# TLS / ACME cache (runtime)
+/certs-cache/
+
+# Debug / test artifacts
+*.log
+*.err
+*.body
+/terminals/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test / coverage
+*.test
+*.out
+coverage.txt
+coverage.html
+
+# Env files (may contain secrets)
+.env
+.env.*

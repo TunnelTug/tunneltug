@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tunneltug-barge-config
+  namespace: tunneltug
+  labels:
+    app.kubernetes.io/name: tunneltug-barge
+    app.kubernetes.io/component: barge
+data:
+  # Edit before apply. Prefer secrets for token in production.
+  token: "replace-with-shared-token"
+  domain: "tunneltug.com"
+  lb: "165.22.14.101:8444"
+  fleet_id: "tunneltug"
+  control_base: "9001"
+  public_base: "8445"
+  port_step: "1"
+  logic_namespace: "default"

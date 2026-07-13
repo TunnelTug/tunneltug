@@ -1,0 +1,126 @@
+# TunnelTug barge fleet on k3s.
+# One server process per pod; hostNetwork + ordinal ports so the LB can dial
+# control (UDP QUIC) and public (TCP) on the node IP.
+#
+# Rolling updates recycle one pod at a time so other backends stay registered.
+#
+# Prerequisites:
+#   - Image loaded into k3s (or pullable registry)
+#   - LB can reach node IP on control/public port ranges
+#   - Pods can reach LB public address for register/heartbeat
+apiVersion: v1
+kind: Service
+metadata:
+  name: tunneltug-barge
+  namespace: tunneltug
+  labels:
+    app.kubernetes.io/name: tunneltug-barge
+    app.kubernetes.io/instance: tunneltug-barge
+    app.kubernetes.io/component: barge
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: tunneltug-barge
+    app.kubernetes.io/instance: tunneltug-barge
+  ports:
+    - name: control
+      port: 9001
+      protocol: UDP
+    - name: public
+      port: 8445
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: tunneltug-barge
+  namespace: tunneltug
+  labels:
+    app.kubernetes.io/name: tunneltug-barge
+    app.kubernetes.io/instance: tunneltug-barge
+    app.kubernetes.io/component: barge
+    app.kubernetes.io/managed-by: tunneltug
+spec:
+  serviceName: tunneltug-barge
+  replicas: 2
+  podManagementPolicy: OrderedReady
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # partition: 0 rolls all ordinals; raise to freeze lower ordinals for canary
+      partition: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: tunneltug-barge
+      app.kubernetes.io/instance: tunneltug-barge
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: tunneltug-barge
+        app.kubernetes.io/instance: tunneltug-barge
+        app.kubernetes.io/component: barge
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      restartPolicy: Always
+      containers:
+        - name: tunneltug
+          image: tunneltug:dev
+          imagePullPolicy: IfNotPresent
+          # Token/domain/LB come from env (see applyEnvDefaults); no shell expansion in args.
+          args:
+            - -mode
+            - server
+            - -control
+            - "9001"
+            - -public
+            - "8445"
+            - -barge-port-step
+            - "1"
+            - -index-from-hostname
+            - -snapshot-dir
+            - /var/lib/tunneltug/snapshots
+            - -snapshot-on-shutdown=true
+            - -snapshot-restore=true
+            - -backend-insecure
+            - -http3=false
+            - -quiet
+          env:
+            - name: TUNNELTUG_TOKEN
+              valueFrom:
+                configMapKeyRef:
+                  name: tunneltug-barge-config
+                  key: token
+            - name: TUNNELTUG_DOMAIN
+              valueFrom:
+                configMapKeyRef:
+                  name: tunneltug-barge-config
+                  key: domain
+            - name: TUNNELTUG_REGISTER_LB
+              valueFrom:
+                configMapKeyRef:
+                  name: tunneltug-barge-config
+                  key: lb
+            - name: TUNNELTUG_REGISTER_HOST
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            - name: TUNNELTUG_INDEX_FROM_HOSTNAME
+              value: "true"
+            - name: TUNNELTUG_SNAPSHOT_DIR
+              value: /var/lib/tunneltug/snapshots
+          ports:
+            - name: control
+              containerPort: 9001
+              protocol: UDP
+            - name: public
+              containerPort: 8445
+              protocol: TCP
+          volumeMounts:
+            - name: snapshots
+              mountPath: /var/lib/tunneltug/snapshots
+      volumes:
+        - name: snapshots
+          hostPath:
+            path: /var/lib/tunneltug/snapshots
+            type: DirectoryOrCreate

@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: tunneltug
+  labels:
+    app.kubernetes.io/name: tunneltug
+    app.kubernetes.io/managed-by: tunneltug

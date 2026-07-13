@@ -1,0 +1,49 @@
+# Custom private TLDs / domains with DoH (DNS-over-HTTPS) resolvers.
+# Use with:
+#   tunneltug -mode client -dns config/dns.yaml ...
+# Or set TUNNELTUG_DNS=/path/to/dns.yaml
+#
+# The local VPI stub (UDP, default 127.0.0.1:5354) matches query names against
+# zones and forwards via RFC 8484 DoH and/or classic DNS (host:port).
+# Point OS or app resolvers at the stub listen address for private names.
+
+# Local stub listen address (overrides -vpi-listen when set).
+listen: 127.0.0.1:5354
+
+# Resolver for names that match no zone (classic host:port or DoH URL).
+fallback: https://cloudflare-dns.com/dns-query
+# fallback: 8.8.8.8:53
+
+# Used when a zone matches but omits doh/upstream.
+# default_doh: https://dns.example.com/dns-query
+# default_upstream: 127.0.0.1:5353
+
+# Extra private TLD labels (resolved via default_doh / default_upstream / mesh).
+# private_tlds:
+#   - internal
+
+zones:
+  # Whole private TLD → corporate DoH resolver
+  - tld: corp
+    doh: https://dns.corp.example/dns-query
+    # doh_method: post   # or get
+
+  # Specific domains (exact, suffix, or wildcard) under any TLD
+  - domains:
+      - services.internal
+      - "*.lab.internal"
+    doh: https://doh.lab.example/dns-query
+
+  # Mesh / built-in private zone via classic DNS (or DoH if you front it)
+  - tld: tunnel
+    domains:
+      - tunneltug.tunnel
+    upstream: 127.0.0.1:5353
+    # Optional DoH with UDP fallback:
+    # doh: https://mesh-dns.example.com/dns-query
+    # upstream: 127.0.0.1:5353
+
+  # Public-looking domain forced through a private DoH path
+  - domains:
+      - "*.private.example.com"
+    doh: https://dns.private.example.com/dns-query

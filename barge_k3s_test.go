@@ -100,12 +100,27 @@ func TestValidateConfig_AcceptsK3sRuntime(t *testing.T) {
 	}
 }
 
-func TestValidateConfig_RejectsK3sWithoutImage(t *testing.T) {
+func TestValidateConfig_K3sDefaultsImageFromHub(t *testing.T) {
 	resetBargeFlags(t)
 	*bargeRuntime = "k3s"
 	*k3sImage = ""
-	if err := validateConfig(); err == nil || !strings.Contains(err.Error(), "k3s-image") {
-		t.Fatalf("expected k3s-image error, got %v", err)
+	*bargeService = "server"
+	*controlPort = "9001"
+	*publicPort = "8445"
+	if err := validateConfig(); err != nil {
+		t.Fatalf("empty k3s-image should default from hub layer: %v", err)
+	}
+	if *k3sImage != defaultK3sBargeImage {
+		t.Fatalf("expected default hub image, got %q", *k3sImage)
+	}
+}
+
+func TestK3sImagePullPolicy(t *testing.T) {
+	if k3sImagePullPolicy(defaultK3sBargeImage) != "Always" {
+		t.Fatal("hub latest should PullAlways")
+	}
+	if k3sImagePullPolicy("tunneltug:local") != "IfNotPresent" {
+		t.Fatal("local tag should IfNotPresent")
 	}
 }
 

@@ -42,6 +42,9 @@ func runServer() {
 		}
 	}
 
+	stopAnycast := startAnycastSideCar(ctx)
+	defer stopAnycast()
+
 	manager := &ServerManager{
 		tunnels: make(map[string]*liveTunnel),
 		pending: make(map[string]SnapshotTunnel),

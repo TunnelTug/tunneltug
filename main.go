@@ -16,6 +16,14 @@ func main() {
 		return
 	}
 
+	if maybeGenToken() {
+		return
+	}
+
+	if maybeGenBGPsecKey() {
+		return
+	}
+
 	if *quiet {
 		log.SetOutput(io.Discard)
 	}
@@ -28,7 +36,13 @@ func main() {
 	if strings.ToLower(strings.TrimSpace(*mode)) == "barge" {
 		bargeScalingProfile()
 	}
-	ensureControlQUIC()
+	// Hub / stack modes do not use QUIC control.
+	switch strings.ToLower(strings.TrimSpace(*mode)) {
+	case "hub", "hub-publish", "stack":
+		// skip QUIC
+	default:
+		ensureControlQUIC()
+	}
 
 	if err := validateConfig(); err != nil {
 		log.Fatalf("Configuration error: %v", err)
@@ -39,6 +53,9 @@ func main() {
 		meshNote := ""
 		if meshActive() {
 			meshNote = ", mesh: on"
+		}
+		if *anycastEnable {
+			meshNote += ", anycast: on"
 		}
 		log.Printf("Starting server %s [control: QUIC, routing: %s%s]", Version, *routing, meshNote)
 		runServer()
@@ -57,6 +74,9 @@ func main() {
 		if meshActive() {
 			meshNote = ", mesh: on"
 		}
+		if *anycastEnable {
+			meshNote += ", anycast: on"
+		}
 		log.Printf("Starting load balancer %s [control: QUIC, routing: %s, policy: %s%s]", Version, *routing, *lbPolicy, meshNote)
 		runLB()
 	case "barge":
@@ -69,7 +89,16 @@ func main() {
 		}
 		log.Printf("Starting orchestrator %s [routing: %s, policy: %s, namespace: %s%s]", Version, *routing, *lbPolicy, normalizeNamespace(*namespace), meshNote)
 		runOrchestrator()
+	case "anycast":
+		runAnycast()
+	case "hub":
+		runHub()
+	case "hub-publish":
+		runHubPublish()
+	case "stack":
+		log.Printf("Starting product stack %s [k3s self-contained, no kubectl]", Version)
+		runStack()
 	default:
-		log.Fatalf("Unknown mode: %s. Use 'server', 'client', 'lb', 'barge', or 'orchestrator'.", *mode)
+		log.Fatalf("Unknown mode: %s. Use 'server', 'client', 'lb', 'barge', 'orchestrator', 'anycast', 'hub', 'hub-publish', or 'stack'.", *mode)
 	}
 }

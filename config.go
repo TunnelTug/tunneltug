@@ -9,17 +9,56 @@ import (
 	"strings"
 )
 
-const (
-	minTokenLength     = 8
-	minProdTokenLength = 16
-	defaultWeakToken   = "secret123"
-)
+const defaultWeakToken = "secret123"
 
 var subdomainPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
 
 func applyEnvDefaults() {
 	if v := strings.TrimSpace(os.Getenv("TUNNELTUG_TOKEN")); v != "" {
-		*authToken = v
+		// Only accept cryptographically strong env tokens; weak values are ignored
+		// so ensureAuthToken can mint a secure one (or fail in -prod).
+		if !isWeakToken(v) {
+			*authToken = v
+		} else {
+			log.Printf("WARNING: ignoring weak TUNNELTUG_TOKEN; will require -token or auto-mint")
+			*authToken = ""
+		}
+	}
+	if v := strings.TrimSpace(os.Getenv("TUNNELTUG_HUB_LISTEN")); v != "" && strings.TrimSpace(*hubListen) == ":5000" {
+		*hubListen = v
+	}
+	if v := strings.TrimSpace(os.Getenv("TUNNELTUG_HUB_PUBLIC")); v != "" && strings.TrimSpace(*hubPublic) == "" {
+		*hubPublic = v
+	}
+	if v := strings.TrimSpace(os.Getenv("TUNNELTUG_HUB_S3_URL")); v != "" && strings.TrimSpace(*hubS3URL) == "https://0trust.social" {
+		*hubS3URL = v
+	}
+	if v := strings.TrimSpace(os.Getenv("TUNNELTUG_HUB_BUCKET")); v != "" && strings.TrimSpace(*hubBucket) == "tunneltug-hub" {
+		*hubBucket = v
+	}
+	if envTruthy("TUNNELTUG_HUB_MEMORY") {
+		*hubMemory = true
+	}
+	if v := strings.TrimSpace(os.Getenv("TUNNELTUG_HUB_PRODUCTS")); v != "" {
+		*hubProducts = v
+	}
+	if v := strings.TrimSpace(os.Getenv("TUNNELTUG_HUB_TAG")); v != "" {
+		*hubTag = v
+	}
+	if v := strings.TrimSpace(os.Getenv("TUNNELTUG_HUB_HOST")); v != "" {
+		*hubHost = v
+	}
+	if v := strings.TrimSpace(os.Getenv("TUNNELTUG_STACK_PRODUCTS")); v != "" {
+		*stackProducts = v
+	}
+	if v := strings.TrimSpace(os.Getenv("TUNNELTUG_STACK_NAMESPACE")); v != "" {
+		*stackNamespace = v
+	}
+	if v := strings.TrimSpace(os.Getenv("TUNNELTUG_STACK_TAG")); v != "" {
+		*stackTag = v
+	}
+	if envTruthy("TUNNELTUG_K3S_STACK") {
+		*k3sStack = true
 	}
 	if v := strings.TrimSpace(os.Getenv("TUNNELTUG_DOMAIN")); v != "" && strings.TrimSpace(*domain) == "" {
 		*domain = v
@@ -50,6 +89,27 @@ func applyEnvDefaults() {
 	}
 	if v := strings.TrimSpace(os.Getenv("TUNNELTUG_K3S_IMAGE")); v != "" && strings.TrimSpace(*k3sImage) == "" {
 		*k3sImage = v
+	}
+	// Default barge image from the k3s-layer hub when unset.
+	if strings.TrimSpace(*k3sImage) == "" {
+		*k3sImage = defaultK3sBargeImage
+	}
+	if envTruthy("TUNNELTUG_K3S_HUB") {
+		*k3sHub = true
+	}
+	if v := strings.TrimSpace(os.Getenv("TUNNELTUG_K3S_HUB")); v != "" {
+		switch strings.ToLower(v) {
+		case "0", "false", "no", "off":
+			*k3sHub = false
+		}
+	}
+	if v := strings.TrimSpace(os.Getenv("TUNNELTUG_K3S_HUB_PULL")); v != "" {
+		switch strings.ToLower(v) {
+		case "0", "false", "no", "off":
+			*k3sHubPull = false
+		case "1", "true", "yes", "on":
+			*k3sHubPull = true
+		}
 	}
 	if v := strings.TrimSpace(os.Getenv("TUNNELTUG_K3S_NAME")); v != "" && strings.TrimSpace(*k3sName) == "tunneltug-barge" {
 		*k3sName = v
@@ -139,6 +199,16 @@ func applyEnvDefaults() {
 	if dnsConfigActive() {
 		*vpiStub = true
 	}
+	if envTruthy("TUNNELTUG_ANYCAST") {
+		*anycastEnable = true
+	}
+	if v := strings.TrimSpace(os.Getenv("TUNNELTUG_ANYCAST_CONFIG")); v != "" && strings.TrimSpace(*anycastConfig) == "" {
+		*anycastConfig = v
+	}
+	// Standalone anycast mode implies the feature is on.
+	if strings.ToLower(strings.TrimSpace(*mode)) == "anycast" {
+		*anycastEnable = true
+	}
 }
 
 func envTruthy(key string) bool {
@@ -152,8 +222,63 @@ func envTruthy(key string) bool {
 
 func validateConfig() error {
 	modeVal := strings.ToLower(strings.TrimSpace(*mode))
-	if modeVal != "server" && modeVal != "client" && modeVal != "lb" && modeVal != "barge" && modeVal != "orchestrator" {
-		return fmt.Errorf("invalid -mode %q: use server, client, lb, barge, or orchestrator", *mode)
+	if modeVal != "server" && modeVal != "client" && modeVal != "lb" && modeVal != "barge" && modeVal != "orchestrator" && modeVal != "anycast" && modeVal != "hub" && modeVal != "hub-publish" && modeVal != "stack" {
+		return fmt.Errorf("invalid -mode %q: use server, client, lb, barge, orchestrator, anycast, hub, hub-publish, or stack", *mode)
+	}
+
+	// Standalone anycast edge: only validate anycast YAML (no tunnel token/ports).
+	if modeVal == "anycast" {
+		if anycastConfigPath() == "" && strings.TrimSpace(*anycastGenBGPsecKey) != "" {
+			return nil
+		}
+		if _, err := loadAnycastConfig(); err != nil {
+			return err
+		}
+		return nil
+	}
+
+	// Barge image hub: OCI registry with public pull / auth push (token validated separately).
+	if modeVal == "hub" {
+		if err := ensureAuthToken(); err != nil {
+			return err
+		}
+		if strings.TrimSpace(*hubBucket) == "" {
+			return fmt.Errorf("-hub-bucket must not be empty")
+		}
+		return nil
+	}
+	// Multi-product push to hub (local k3s images → hub.tunneltug.com/0trust/*).
+	if modeVal == "hub-publish" {
+		if err := ensureAuthToken(); err != nil {
+			return err
+		}
+		if _, err := parseHubProductList(*hubProducts); err != nil {
+			return err
+		}
+		return nil
+	}
+	// Product stack: Deployments/Services via client-go (self-contained, no kubectl).
+	if modeVal == "stack" {
+		if err := ensureAuthToken(); err != nil {
+			return err
+		}
+		if _, err := parseStackProducts(*stackProducts); err != nil {
+			return err
+		}
+		if err := validatePort("stack-dash", *stackDashPort); err != nil {
+			return err
+		}
+		return nil
+	}
+
+	// Sidecar anycast on server/lb.
+	if *anycastEnable {
+		if modeVal != "server" && modeVal != "lb" {
+			return fmt.Errorf("-anycast sidecar is only valid with -mode server or lb (use -mode anycast for standalone)")
+		}
+		if _, err := loadAnycastConfig(); err != nil {
+			return err
+		}
 	}
 
 	routingVal := strings.ToLower(strings.TrimSpace(*routing))
@@ -169,21 +294,9 @@ func validateConfig() error {
 		return fmt.Errorf("-domain is required with -prod or -dev")
 	}
 
-	token := strings.TrimSpace(*authToken)
-	if token == "" {
-		return fmt.Errorf("authentication token is required (set -token or TUNNELTUG_TOKEN)")
-	}
-
-	minLen := minTokenLength
-	if *prod {
-		minLen = minProdTokenLength
-	}
-	if len(token) < minLen {
-		return fmt.Errorf("token must be at least %d characters", minLen)
-	}
-
-	if token == defaultWeakToken {
-		log.Printf("WARNING: using the example token %q; generate a strong secret for production", defaultWeakToken)
+	// Cryptographic tokens only — mint if empty (non-prod) or reject weak defaults.
+	if err := ensureAuthToken(); err != nil {
+		return err
 	}
 
 	for _, spec := range []struct {
@@ -348,8 +461,9 @@ func validateBargeConfig() error {
 		if service != "server" {
 			return fmt.Errorf("-barge-runtime k3s requires -barge-service server")
 		}
+		// Image defaults to the k3s barge hub ref when unset.
 		if strings.TrimSpace(*k3sImage) == "" {
-			return fmt.Errorf("-k3s-image is required with -barge-runtime k3s")
+			*k3sImage = defaultK3sBargeImage
 		}
 		ns := strings.TrimSpace(*k3sNamespace)
 		if ns == "" {

@@ -65,8 +65,9 @@ spec:
       restartPolicy: Always
       containers:
         - name: tunneltug
-          image: tunneltug:dev
-          imagePullPolicy: IfNotPresent
+          # TunnelTug engine — pods in the barge-mode k3s fleet run this binary.
+          image: hub.tunneltug.com/tunneltug/engine:latest
+          imagePullPolicy: Always
           # Token/domain/LB come from env (see applyEnvDefaults); no shell expansion in args.
           args:
             - -mode

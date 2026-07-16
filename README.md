@@ -17,6 +17,7 @@ TunnelTug exposes local HTTP services to the internet through a **QUIC control t
 - **Product vhosts** — Co-host apex/www apps next to tunnel subdomains (`-vhosts`)
 - **Built-in mesh** — `secure_dns` + `secure_registrar` private zone (default `*.tunneltug.tunnel`) without an external platform
 - **VPI stub** — Local resolver for private TLDs (`.tunnel` / `.mesh` / `.social`)
+- **Anycast edge** — BGP health-gated split-horizon DNS face (`-mode anycast` or `-anycast` sidecar on server/lb)
 
 ## Architecture
 
@@ -45,6 +46,71 @@ flowchart LR
 | `lb` | Front many servers; sticky/RR + dynamic barge registration |
 | `barge` | Fleet of server backends (**k3s** default; `process` for dev) |
 | `orchestrator` | Namespace-aware LB + control plane |
+| `anycast` | Multi-PoP anycast edge: split-horizon DNS + BGP announce/withdraw |
+| `hub` | OCI registry (`hub.tunneltug.com`); public pull, auth push; blobs on 0trust.social S3 |
+| `hub-publish` | Push local k3s images for mail/search/platform/services/social/barge to the hub |
+
+### Anycast edge (built-in)
+
+Health-gated BGP anycast for the private TLD / DoH face. Same binary as tunnel modes.
+
+**Standalone (dry-run BGP log backend):**
+
+```bash
+./bin/tunneltug -mode anycast -anycast-config config/anycast.local.yaml
+```
+
+**Sidecar on server or LB:**
+
+```bash
+./bin/tunneltug \
+  -mode server \
+  -mesh \
+  -anycast \
+  -anycast-config config/anycast.example.yaml \
+  -token "<token>" \
+  ...
+```
+
+| Flag / env | Purpose |
+|------------|---------|
+| `-mode anycast` | Run only the anycast edge |
+| `-anycast` | Enable sidecar (server/lb) |
+| `-anycast-config` / `TUNNELTUG_ANYCAST_CONFIG` | YAML (see `config/anycast.example.yaml`) |
+| `TUNNELTUG_ANYCAST=1` | Same as `-anycast` |
+| `-anycast-gen-bgpsec-key path` | Write ECDSA P-256 **BGPsec router** key PEM + print SKI (not ACME) |
+
+Status API (from YAML `listen`, default `127.0.0.1:9099`): `GET /health`, `/ready`, `/status`.  
+BGP backends: `log` (default dry-run), `exabgp`, `bird`, `file`.
+
+#### Routing security (ROV + BGPsec)
+
+Announces are **fail-closed** when security is enabled:
+
+1. **ROV (RPKI origin validation)** — refuse prefixes your origin ASN is not authorized to announce (`bgp.security.rov`).
+2. **BGPsec origin signing** — sign each prefix in-process with an **RPKI BGPsec router key** (ECDSA P-256, RFC 8205/8208 suite 1). This is **not** the ACME/TLS key.
+
+```bash
+# Lab key (enroll under RPKI for production ASN)
+./bin/tunneltug -anycast-gen-bgpsec-key config/bgpsec-router.lab.key
+
+./bin/tunneltug -mode anycast -anycast-config config/anycast.local.yaml
+# curl -s http://127.0.0.1:19099/status | jq .bgp.security
+```
+
+`/ready` is 200 only when health is good **and** routes are announced (ROV + BGPsec gates passed).
+
+### Shadow profile (extra suffixes + zone pack)
+
+Same anycast loop; put public-looking labels in `dns.private_suffixes`, seed records with `dns.zone_pack`, optional `origin` HTTP face.
+
+```bash
+./bin/tunneltug -mode anycast -anycast-config config/shadow.example.yaml
+# dig @127.0.0.1 -p 15353 www.example.com +short
+# curl -s http://127.0.0.1:19099/status
+```
+
+See `config/shadow.example.yaml` and `deploy/shadow/`.
 
 ## Quick start
 
@@ -65,7 +131,7 @@ make build
   -mode server \
   -dev \
   -domain localhost \
-  -token "$(openssl rand -hex 24)" \
+  -token "$(./bin/tunneltug -gen-token)" \
   -public 8443
 ```
 
@@ -97,7 +163,7 @@ Single shared tunnel on the apex domain — no subdomains, no mesh required:
   -routing direct \
   -domain example.com \
   -email admin@example.com \
-  -token "$(openssl rand -hex 32)"
+  -token "$(./bin/tunneltug -gen-token)"
 ```
 
 **Client:**
@@ -109,7 +175,7 @@ Single shared tunnel on the apex domain — no subdomains, no mesh required:
   -routing direct \
   -domain example.com \
   -local 3000 \
-  -token "<same-token>"
+  -token "<same-crypto-token>"
 ```
 
 Visit `https://example.com` (and `https://www.example.com` when DNS points there).
@@ -125,7 +191,7 @@ Visit `https://example.com` (and `https://www.example.com` when DNS points there
   -domain example.com \
   -subalt '*.example.com' \
   -email admin@example.com \
-  -token "$(openssl rand -hex 32)"
+  -token "$(./bin/tunneltug -gen-token)"
 ```
 
 **Client:**
@@ -328,9 +394,10 @@ Optional `auth_proxy: true` proxies `/auth/*`, `/samln/*`, and related IdP paths
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `-mode` | `client` | `server`, `client`, `lb`, `barge`, `orchestrator` |
+| `-mode` | `client` | `server`, `client`, `lb`, `barge`, `orchestrator`, `anycast`, `hub` |
 | `-routing` | `subdomain` | `subdomain` or `direct` |
-| `-token` | — | Shared auth secret (min 8; 16 in `-prod`) |
+| `-token` | — | Cryptographic auth secret (min 16; 32 in `-prod`). Empty auto-mints in non-prod |
+| `-gen-token` | `false` | Print a crypto/rand 256-bit token and exit |
 | `-control` | `9000` | QUIC control port (UDP) |
 | `-public` | `8080` | Public HTTP(S)/HTTP/3 port |
 | `-local` | `3000` | Local app port (client) |
@@ -357,7 +424,14 @@ Optional `auth_proxy: true` proxies `/auth/*`, `/samln/*`, and related IdP paths
 | `-barge-runtime` | `k3s` | `k3s` (production) or `process` (development) |
 | `-barge-lb` | — | LB `host:port` for registration |
 | `-barge-fleet-id` | — | Fleet id on heartbeats |
-| `-k3s-image` | — | Container image (required for k3s runtime) |
+| `-k3s-image` | hub default | Barge pod image (`hub.tunneltug.com/tunneltug/barge:latest`) |
+| `-k3s-hub` | `true` | Embed barge image hub in k3s controller |
+| `-k3s-hub-pull` | `true` | `k3s ctr pull` image before reconcile |
+| `-k3s-hub-publish` | — | Local image to push to hub |
+| `-hub-listen` | `:5000` | Hub bind (k3s layer) |
+| `-hub-public` | `https://hub.tunneltug.com` | Public registry URL |
+| `-hub-s3-url` | `https://0trust.social` | S3 CDN for blobs |
+| `-hub-bucket` | `tunneltug-hub` | S3 bucket |
 | `-k3s-kubeconfig` | — | Kubeconfig (else in-cluster / `~/.kube/config`) |
 | `-k3s-namespace` | `tunneltug` | Workload namespace |
 | `-k3s-host-network` | `true` | hostNetwork for QUIC (recommended) |
@@ -387,7 +461,12 @@ Optional `auth_proxy: true` proxies `/auth/*`, `/samln/*`, and related IdP paths
 
 | Variable | Maps to |
 |----------|---------|
-| `TUNNELTUG_TOKEN` | `-token` |
+| `TUNNELTUG_TOKEN` | `-token` (weak values rejected) |
+| `TUNNELTUG_K3S_IMAGE` | `-k3s-image` |
+| `TUNNELTUG_HUB_LISTEN` | `-hub-listen` |
+| `TUNNELTUG_HUB_PUBLIC` | `-hub-public` |
+| `TUNNELTUG_HUB_S3_URL` | `-hub-s3-url` |
+| `TUNNELTUG_HUB_BUCKET` | `-hub-bucket` |
 | `TUNNELTUG_DOMAIN` | `-domain` |
 | `TUNNELTUG_SERVER` | `-server` |
 | `TUNNELTUG_SUBDOMAIN` | `-subdomain` |
@@ -409,16 +488,52 @@ Optional `auth_proxy: true` proxies `/auth/*`, `/samln/*`, and related IdP paths
 | `TUNNELTUG_VPI_LISTEN` | `-vpi-listen` |
 | `TUNNELTUG_DNS` | `-dns` |
 
-## Docker
+## Hub + k3s fleets (what “barge” means)
+
+**Barge** = TunnelTug operating a **k3s fleet** of tunnel servers.  
+Not an app product. Fleet pods run the **TunnelTug engine** image; the hub is embedded in that controller.
 
 ```bash
-docker build -t tunneltug:latest .
-
-docker run --rm -p 8080:8080/tcp -p 8443:8443/tcp -p 8443:8443/udp -p 9000:9000/udp \
-  tunneltug:latest \
-  -mode server -dev -domain localhost -public 8443 \
-  -token "$(openssl rand -hex 24)"
+tunneltug -mode barge -barge-runtime k3s ...
 ```
+
+| | |
+|--|--|
+| **Hub** | Embedded (`-k3s-hub`, default on) |
+| **Engine image** | `hub.tunneltug.com/tunneltug/engine:latest` |
+| **0Trust apps** | `hub.tunneltug.com/0trust/{mail,search,platform,services,social}` |
+| **Blobs** | 0trust.social S3 |
+
+```bash
+export TUNNELTUG_TOKEN="$(./bin/tunneltug -gen-token)"
+
+# k3s fleet through TunnelTug
+./bin/tunneltug -mode barge -barge-runtime k3s \
+  -barge-replicas 2 \
+  -barge-lb 165.22.14.101:8444 \
+  -k3s-kubeconfig /etc/rancher/k3s/k3s.yaml \
+  -token "$TUNNELTUG_TOKEN" \
+  -domain tunneltug.com
+```
+
+### Build / publish apps + engine
+
+```bash
+# 0TrustCloud monorepo
+export TUNNELTUG_TOKEN=… HUB_TAG=dev TUNNELTUG_ROOT=~/tunneltug
+./deploy/oci/build-and-publish.sh all   # mail search platform services social tunneltug
+
+./bin/tunneltug -mode hub-publish \
+  -hub-products mail,search,platform,services,social,tunneltug \
+  -hub-tag dev -token "$TUNNELTUG_TOKEN"
+
+# Product apps (Williwaw, MotionKB, …) — self-contained k3s, no kubectl
+./bin/tunneltug -mode stack \
+  -stack-products williwaw,motionkb,ack,social \
+  -stack-tag dev -token "$TUNNELTUG_TOKEN"
+```
+
+See `deploy/hub/README.md`, `0TrustCloud/deploy/oci/`, `0TrustCloud/deploy/k3s/stack/`.
 
 ## Health check
 
@@ -434,7 +549,9 @@ LB also exposes `/_tunneltug/lb/register`, `/heartbeat`, `/deregister` when dyna
 
 ## Security notes
 
-- Always use a strong random `-token` in production (32+ bytes recommended).
+- **Cryptographic tokens only.** Mint with `./bin/tunneltug -gen-token` (crypto/rand, 256-bit hex). Weak defaults (`secret123`, short strings) are rejected. tunneltug.com never accepts user-submitted tokens — the dashboard generates and displays them.
+- Production requires a token of at least **32** characters; non-prod auto-mints if unset.
+- Hub image **push** requires the same crypto token (`k3s ctr images push --user tunneltug:$TOKEN`); **pull** is public into k3s.
 - Do not use `-insecure` outside local development.
 - Open **UDP** for the control port and HTTP/3; TCP alone is not sufficient.
 - Keep `wildcard_subdomains: false` on tunnel product domains so user subdomains stay tunnels.

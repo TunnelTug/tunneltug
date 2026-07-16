@@ -13,7 +13,7 @@ import (
 const defaultTunnelKey = "default"
 
 var (
-	mode         = flag.String("mode", "client", "Run mode: 'server', 'client', 'lb', 'barge', or 'orchestrator'")
+	mode         = flag.String("mode", "client", "Run mode: 'server', 'client', 'lb', 'barge', 'orchestrator', 'anycast', 'hub', 'hub-publish', or 'stack'")
 	protocol     = flag.String("proto", "quic", "Control transport protocol: 'quic' (UDP)")
 	routing      = flag.String("routing", "subdomain", "Routing mode: 'subdomain' (host-based) or 'direct' (single tunnel, no subdomain)")
 	serverIP     = flag.String("server", "127.0.0.1", "Server IP (client mode)")
@@ -22,7 +22,9 @@ var (
 	controlPort  = flag.String("control", "9000", "Control port (used by both)")
 	subdomain    = flag.String("subdomain", "myapp", "Requested subdomain (client mode, subdomain routing only)")
 	namespace    = flag.String("namespace", "", "Logical namespace for tunnel routing and orchestration (default: default)")
-	authToken    = flag.String("token", "secret123", "Authentication token (or set TUNNELTUG_TOKEN)")
+	// Empty default: crypto-minted at startup (non-prod) or required via env/-token. Never use weak defaults.
+	authToken    = flag.String("token", "", "Cryptographic auth token (or TUNNELTUG_TOKEN). Empty auto-mints in non-prod; use -gen-token to print one")
+	genToken     = flag.Bool("gen-token", false, "Generate a cryptographic tunnel token (crypto/rand) and exit")
 	dashPort     = flag.String("dash", "4040", "Local dashboard port (client mode)")
 	prod         = flag.Bool("prod", false, "Production mode: obtain TLS certs via ACME (Let's Encrypt)")
 	dev          = flag.Bool("dev", false, "Development mode: generate a self-signed TLS cert for -domain")
@@ -60,12 +62,17 @@ var (
 	bargeRuntime     = flag.String("barge-runtime", "k3s", "Barge runtime: 'k3s' (production StatefulSet pods) or 'process' (local supervisor, development)")
 	k3sKubeconfig    = flag.String("k3s-kubeconfig", "", "Kubeconfig path for k3s barge runtime (empty: in-cluster, then ~/.kube/config)")
 	k3sNamespace     = flag.String("k3s-namespace", "tunneltug", "Kubernetes namespace for barge workloads (k3s runtime)")
-	k3sImage         = flag.String("k3s-image", "", "Container image for barge pods (required for k3s; or set TUNNELTUG_K3S_IMAGE)")
+	k3sImage         = flag.String("k3s-image", "", "TunnelTug engine image for k3s fleet pods (default hub.tunneltug.com/tunneltug/engine:latest)")
 	k3sName          = flag.String("k3s-name", "tunneltug-barge", "StatefulSet / app name (k3s runtime)")
 	k3sHostNetwork   = flag.Bool("k3s-host-network", true, "Run barge pods with hostNetwork (k3s runtime; needed for QUIC)")
 	k3sUpdatePartition = flag.Int("k3s-update-partition", 0, "StatefulSet rollingUpdate.partition (0 = roll all ordinals)")
 	k3sCleanup       = flag.Bool("k3s-cleanup", false, "Delete barge StatefulSet on controller shutdown (default: leave pods up)")
 	k3sNodeSelector  = flag.String("k3s-node-selector", "", "Comma-separated key=value nodeSelector for barge pods")
+	// Hub is embedded when TunnelTug runs k3s fleets (-mode barge -barge-runtime k3s).
+	k3sHub            = flag.Bool("k3s-hub", true, "Embed OCI hub in k3s fleet controller (public pull, auth push → 0trust.social S3)")
+	k3sHubPull        = flag.Bool("k3s-hub-pull", true, "Pull engine image into local k3s via k3s ctr before reconciling pods")
+	k3sHubPublish     = flag.String("k3s-hub-publish", "", "Local k3s image to tag+push as engine image (e.g. tunneltug:local)")
+	k3sHubPublishOnly = flag.Bool("k3s-hub-publish-only", false, "With -k3s-hub-publish: push then exit (do not run fleet)")
 	registerLB       = flag.String("register-lb", "", "LB public host:port for server self-registration (server mode / k3s pods)")
 	registerHost     = flag.String("register-host", "", "Host address advertised to LB (server self-registration; node IP in k3s)")
 	registerFleetID  = flag.String("register-fleet-id", "", "Fleet id for server self-registration (default: hostname)")
@@ -101,6 +108,32 @@ var (
 	vhostsFile = flag.String("vhosts", "", "Path to product vhost YAML/JSON config (or set TUNNELTUG_VHOSTS)")
 	// Private DNS zones: custom TLDs/domains routed to DoH or classic resolvers.
 	dnsFileFlag = flag.String("dns", "", "Path to DNS zones YAML/JSON (custom TLDs/domains + DoH; or set TUNNELTUG_DNS)")
+
+	// Anycast edge (BGP health-gated split-horizon DNS face). Standalone: -mode anycast.
+	// Sidecar on server/lb: -anycast -anycast-config path.
+	anycastEnable = flag.Bool("anycast", false, "Run anycast edge sidecar (server/lb) or required with -mode anycast")
+	anycastConfig = flag.String("anycast-config", "", "Anycast YAML config (or TUNNELTUG_ANYCAST_CONFIG); see config/anycast.example.yaml")
+	// Generate ECDSA P-256 BGPsec router key PEM (RPKI router key material — not ACME TLS).
+	anycastGenBGPsecKey = flag.String("anycast-gen-bgpsec-key", "", "Write a new BGPsec P-256 private key PEM to this path and print SKI, then exit")
+
+	// Hub listen/S3 settings used by the k3s barge layer (and optional -mode hub standalone).
+	hubListen  = flag.String("hub-listen", ":5000", "OCI hub listen address (embedded in k3s fleet mode; also -mode hub)")
+	hubPublic  = flag.String("hub-public", "https://hub.tunneltug.com", "Public registry URL")
+	hubS3URL   = flag.String("hub-s3-url", "https://0trust.social", "0trust.social S3 CDN for image blobs")
+	hubBucket  = flag.String("hub-bucket", "tunneltug-hub", "S3 bucket for image storage")
+	hubMemory  = flag.Bool("hub-memory", false, "In-memory hub store (dev/tests only)")
+	// Multi-product publish: 0trust apps + tunneltug engine (or "all"). "barge" is a legacy alias for tunneltug.
+	hubProducts = flag.String("hub-products", "all", "Products for -mode hub-publish: mail,search,platform,services,social,tunneltug|all")
+	hubTag      = flag.String("hub-tag", "latest", "Image tag for -mode hub-publish / stack")
+	hubHost     = flag.String("hub-host", "hub.tunneltug.com", "Registry host for -mode hub-publish (no scheme)")
+
+	// Product stack: self-contained k3s Deployments (williwaw, motionkb, …) — no kubectl.
+	stackProducts  = flag.String("stack-products", "social,ack,williwaw,motionkb,mail,search", "Comma-separated apps for -mode stack (or all)")
+	stackNamespace = flag.String("stack-namespace", "0trust-stack", "k3s namespace for product stack")
+	stackTag       = flag.String("stack-tag", "", "Image tag for stack apps (default: -hub-tag or dev)")
+	stackDashPort  = flag.String("stack-dash", "4070", "Product stack dashboard port")
+	// When true, barge k3s mode also reconciles the product stack in-process.
+	k3sStack = flag.Bool("k3s-stack", false, "With -mode barge -barge-runtime k3s: also run product stack reconcile (no kubectl)")
 )
 
 type certProvider struct {

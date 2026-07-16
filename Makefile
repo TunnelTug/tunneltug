@@ -29,3 +29,12 @@ run-server:
 
 run-client:
 	go run . -mode client -token "$${TUNNELTUG_TOKEN:-changeme-dev-token-16}" -server 127.0.0.1 -insecure
+
+run-anycast:
+	go run . -mode anycast -anycast-config config/anycast.local.yaml
+
+run-hub:
+	go run . -mode hub -hub-memory -token "$${TUNNELTUG_TOKEN:-}"
+
+gen-token:
+	go run . -gen-token

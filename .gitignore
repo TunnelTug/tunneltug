@@ -16,6 +16,11 @@
 # TLS / ACME cache (runtime)
 /certs-cache/
 
+# BGPsec router keys (never commit real keys)
+config/bgpsec-router*.key
+**/bgpsec-router*.key
+/state/
+
 # Debug / test artifacts
 *.log
 *.err
@@ -44,4 +49,5 @@ coverage.html
 .env.*
 # Local publish scratch
 .publish-modules/
+.publish-0trust/
 

@@ -1,0 +1,134 @@
+# TunnelTug anycast edge: BGP health-gated split-horizon DNS face.
+# Standalone:  tunneltug -mode anycast -anycast-config config/anycast.example.yaml
+# Sidecar:     tunneltug -mode server -anycast -anycast-config ... (with mesh/tunnel)
+# When this PoP can answer the private TLD, announce anycast prefixes.
+# When unhealthy, withdraw so traffic shifts to other anycast edges.
+
+node_id: edge-sfo-1
+listen: "127.0.0.1:9099"   # status / health HTTP API
+
+# Private TLD(s) this PoP serves (open non-ICANN namespace).
+tlds:
+  - tunnel
+  # - mesh
+  # - factory
+
+# Product zone + NS glue (mirrors tunneltug -mesh-zone / -mesh-ns).
+zone: tunneltug.tunnel
+ns_host: ns.tunneltug.tunnel
+
+# Local split-horizon DNS (secure_dns AuthoritativeServer).
+# Private suffixes → local zone; everything else → public recursive.
+dns:
+  enabled: true
+  # Bind the anycast VIP on this host (or loopback for dry-run).
+  listen: "0.0.0.0:53"
+  recursive:
+    - "1.1.1.1:53"
+    - "8.8.8.8:53"
+  # Bootstrap glue when no zone sync is available.
+  anycast_ip: "203.0.113.53"   # A for ns_host / zone apex
+  private_suffixes:
+    - ".tunnel"
+    - ".mesh"
+    - ".social"
+  # Optional local ZoneSnapshot JSON (file or dir of *.json). {{VIP}} → anycast_ip.
+  # zone_pack: "deploy/shadow/zones/shadow.json"
+
+# Optional HTTP origin face on this edge.
+# origin:
+#   enabled: true
+#   listen: "127.0.0.1:8080"
+#   banner: ""
+
+# Pull ZoneSnapshot from TunnelTug mesh / 0Trust nameservice (optional).
+# Same shape as GET /api/v1/nameservice/sync (secure_dns.ZoneSnapshot).
+sync:
+  enabled: false
+  url: "http://127.0.0.1:8443/api/v1/nameservice/sync"
+  token: ""                     # X-0Trust-Sync-Token
+  interval: 30s
+  # Also probe TunnelTug mesh DNS directly for records.
+  mesh_dns: "127.0.0.1:5353"
+
+# Health gates — all enabled checks must pass before BGP announce.
+health:
+  interval: 5s
+  fail_threshold: 3             # consecutive failures → withdraw
+  recover_threshold: 2          # consecutive successes → announce
+  timeout: 2s
+  # Query local split DNS for the TLD NS / apex A.
+  dns_probe:
+    enabled: true
+    # host:port of the resolver to probe (default: dns.listen)
+    target: "127.0.0.1:53"
+    names:
+      - "tunnel"                # private TLD itself (NS)
+      - "ns.tunneltug.tunnel"   # glue A
+      - "tunneltug.tunnel"      # product apex
+    expect_types: ["NS", "A"]
+  # HTTP probes (TunnelTug edge / mesh status).
+  http_probes:
+    - url: "http://127.0.0.1:9090/health"
+      expect_status: 200
+  # TCP dials (optional).
+  tcp_probes: []
+  #   - "127.0.0.1:443"
+
+# BGP announce/withdraw when healthy/unhealthy.
+bgp:
+  # backend: log | exabgp | bird | file
+  backend: log
+  local_asn: 65001
+  # Neighbor ASN — also default BGPsec Target AS (signature bound to peer).
+  peer_asn: 65000
+  # ibgp: true   # when set and peer_asn is 0, peer_asn defaults to local_asn
+  # Next-hop for announced routes (usually the anycast VIP or this router).
+  next_hop: "203.0.113.53"
+  # Prefixes to announce when healthy (anycast service addresses).
+  prefixes:
+    - "203.0.113.53/32"
+    # - "2001:db8::53/128"
+  # Communities attached to announcements (optional).
+  communities:
+    - "65001:53"
+  # ExaBGP: path to FIFO/socket command pipe, or "stdout".
+  exabgp:
+    # Write announce/withdraw lines to this process stdin helper or file.
+    command_path: "exabgp.cmd"
+  # BIRD: rewrite a static routes include + birdc configure.
+  bird:
+    include_path: "/etc/bird/anycast-routes.conf"
+    birdc: "birdc"
+    protocol: "anycast4"
+  # file: write routes in a simple text format for external consumers.
+  file:
+    path: "state/announced.routes"
+
+  # --- Routing security (in-process; not ACME) ---
+  # ROV: only announce if origin ASN is authorized for the prefix (RFC 6811).
+  # BGPsec: sign origin with RPKI *router* ECDSA P-256 key (RFC 8205/8208 suite 1).
+  # Generate lab key:  tunneltug -anycast-gen-bgpsec-key /path/router.key
+  # Enroll the public key under RPKI as a BGPsec router certificate for local_asn.
+  security:
+    fail_closed: true
+    rov:
+      enabled: true
+      require_valid: true
+      # Lab: private ASN + RFC 5737 DOC space without real ROAs.
+      allow_private: true
+      # Production: publish ROAs at your RIR / Krill, then:
+      # require_valid: true
+      # allow_private: false
+      # roas:
+      #   - prefix: "203.0.113.0/24"
+      #     asn: 64496
+      #     max_length: 32
+      # roa_file: /var/lib/tunneltug/roas.json
+    bgpsec:
+      enabled: true
+      require_sign: true
+      private_key: /etc/tunneltug/bgpsec-router.key
+      # ski: optional 40-hex from router cert; derived from SPKI if empty
+      target_asn: 65000          # eBGP peer AS (0 → peer_asn)
+      signature_file: state/bgpsec-signatures.jsonl

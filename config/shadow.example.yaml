@@ -1,0 +1,78 @@
+# TunnelTug anycast edge with extra authoritative suffixes + local zone pack.
+# Same control loop as anycast.example.yaml.
+#
+#   tunneltug -mode anycast -anycast-config config/shadow.example.yaml
+
+node_id: edge-shadow-1
+listen: "127.0.0.1:19099"
+
+tlds:
+  - tunnel
+zone: tunneltug.tunnel
+ns_host: ns.shadow
+
+dns:
+  enabled: true
+  listen: "127.0.0.1:15353"
+  recursive:
+    - "1.1.1.1:53"
+  anycast_ip: "203.0.113.53"
+  private_suffixes:
+    - ".tunnel"
+    - ".mesh"
+    - ".com"
+    - ".net"
+    - ".org"
+    - ".io"
+  # Local ZoneSnapshot ({{VIP}} expanded to anycast_ip / next_hop).
+  zone_pack: "deploy/shadow/zones/shadow.json"
+
+sync:
+  enabled: false
+
+health:
+  interval: 3s
+  fail_threshold: 2
+  recover_threshold: 1
+  timeout: 2s
+  dns_probe:
+    enabled: true
+    target: "127.0.0.1:15353"
+    names:
+      - "tunnel"
+      - "example.com"
+      - "www.example.com"
+      - "ns.shadow"
+    expect_types: ["A", "NS"]
+  http_probes:
+    - url: "http://127.0.0.1:8080/health"
+      expect_status: 200
+
+bgp:
+  backend: log
+  local_asn: 65000
+  peer_asn: 65000
+  ibgp: true
+  next_hop: "203.0.113.53"
+  prefixes:
+    - "203.0.113.53/32"
+  bird:
+    include_path: "state/anycast-routes.conf"
+    birdc: "birdc"
+    protocol: "anycast4"
+  file:
+    path: "state/announced.routes"
+  security:
+    fail_closed: false
+    rov:
+      enabled: true
+      require_valid: false
+      allow_private: true
+    bgpsec:
+      enabled: false
+
+# Optional HTTP face on the edge VIP / loopback.
+origin:
+  enabled: true
+  listen: "127.0.0.1:8080"
+  banner: "ICANNT BELIEVE ITS NOT THE INTERNET"

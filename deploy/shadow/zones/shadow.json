@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "host": "ns.shadow",
+  "private_suffixes": [".com", ".net", ".org", ".io"],
+  "records": [
+    {"domain": "ns.shadow", "type": "A", "value": "{{VIP}}", "ttl": 60},
+    {"domain": "com", "type": "NS", "value": "ns.shadow", "ttl": 3600},
+    {"domain": "net", "type": "NS", "value": "ns.shadow", "ttl": 3600},
+    {"domain": "org", "type": "NS", "value": "ns.shadow", "ttl": 3600},
+    {"domain": "io", "type": "NS", "value": "ns.shadow", "ttl": 3600},
+    {"domain": "example.com", "type": "A", "value": "{{VIP}}", "ttl": 60},
+    {"domain": "example.com", "type": "NS", "value": "ns.shadow", "ttl": 3600},
+    {"domain": "example.com", "type": "TXT", "value": "v=ICANNT;plane=shadow", "ttl": 60},
+    {"domain": "www.example.com", "type": "A", "value": "{{VIP}}", "ttl": 60},
+    {"domain": "www.example.com", "type": "TXT", "value": "ICANNT BELIEVE ITS NOT THE INTERNET", "ttl": 60},
+    {"domain": "icannt.example.com", "type": "A", "value": "{{VIP}}", "ttl": 60},
+    {"domain": "bank.example.net", "type": "A", "value": "{{VIP}}", "ttl": 60},
+    {"domain": "login.example.org", "type": "A", "value": "{{VIP}}", "ttl": 60},
+    {"domain": "app.example.io", "type": "A", "value": "{{VIP}}", "ttl": 60}
+  ]
+}

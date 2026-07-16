@@ -144,6 +144,9 @@ func runLB() {
 		}
 	}
 
+	stopAnycast := startAnycastSideCar(ctx)
+	defer stopAnycast()
+
 	backends, err := parseStaticBackends(*lbBackends)
 	if err != nil {
 		log.Fatalf("Backend configuration error: %v", err)

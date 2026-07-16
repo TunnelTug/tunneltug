@@ -32,6 +32,10 @@ func resetBargeFlags(t *testing.T) {
 	*k3sCleanup = false
 	*k3sKubeconfig = ""
 	*k3sNodeSelector = ""
+	*k3sHub = true
+	*k3sHubPull = true
+	*k3sHubPublish = ""
+	*k3sHubPublishOnly = false
 	*registerLB = ""
 	*registerHost = ""
 	*registerFleetID = ""

@@ -1,0 +1,43 @@
+node_id: local-dev
+listen: "127.0.0.1:19099"
+tlds: [tunnel]
+zone: tunneltug.tunnel
+ns_host: ns.tunneltug.tunnel
+dns:
+  enabled: true
+  listen: "127.0.0.1:28535"
+  recursive: ["1.1.1.1:53", "8.8.8.8:53"]
+  anycast_ip: "203.0.113.53"
+  private_suffixes: [".tunnel", ".mesh", ".social"]
+sync:
+  enabled: false
+health:
+  interval: 2s
+  fail_threshold: 2
+  recover_threshold: 1
+  timeout: 2s
+  dns_probe:
+    enabled: true
+    target: "127.0.0.1:28535"
+    names: ["tunnel", "ns.tunneltug.tunnel", "tunneltug.tunnel"]
+    expect_types: ["NS", "A"]
+bgp:
+  backend: log
+  local_asn: 65001
+  peer_asn: 65000
+  next_hop: "203.0.113.53"
+  prefixes: ["203.0.113.53/32"]
+  communities: ["65001:53"]
+  # RPKI ROV + in-process BGPsec origin signing (router key ≠ ACME TLS key).
+  security:
+    fail_closed: true
+    rov:
+      enabled: true
+      require_valid: true
+      allow_private: true   # DOC prefixes + private ASN for lab
+    bgpsec:
+      enabled: true
+      require_sign: true
+      private_key: config/bgpsec-router.lab.key
+      target_asn: 65000
+      signature_file: state/bgpsec-signatures.jsonl

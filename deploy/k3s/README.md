@@ -17,15 +17,28 @@ Pods use **hostNetwork** and `-index-from-hostname` so pod `tunneltug-barge-0` b
 
 ## Apply
 
-1. Edit `configmap.yaml` (token, domain, LB address).
-2. Load or push the image referenced in `statefulset.yaml`.
-3. Apply:
+1. Edit `configmap.yaml` (token, domain, LB address). Mint a crypto token with `tunneltug -gen-token` — never user-submitted or weak defaults.
+2. **Barge** = this controller running the fleet on **k3s**. Hub is embedded (`-k3s-hub`).
+   - OCI registry (public pull / auth push → 0trust.social S3)
+   - Pulls the **engine** image (`-k3s-image`, default `hub.tunneltug.com/tunneltug/engine:latest`)
+   - Reconciles StatefulSet pods that run that engine
 
 ```bash
-kubectl apply -f deploy/k3s/
-kubectl -n tunneltug rollout status sts/tunneltug-barge
-kubectl -n tunneltug get pods -l app.kubernetes.io/name=tunneltug-barge -o wide
+# Publish engine image, then run k3s fleet
+tunneltug -mode barge -barge-runtime k3s \
+  -k3s-hub-publish tunneltug:local \
+  -k3s-image hub.tunneltug.com/tunneltug/engine:latest \
+  -token "$TOKEN" ...
+
+# Push engine only
+tunneltug -mode barge -barge-runtime k3s \
+  -k3s-hub-publish tunneltug:local \
+  -k3s-hub-publish-only \
+  -token "$TOKEN"
 ```
+
+3. Prefer the **controller** above (self-contained). YAML under `deploy/k3s/` is reference shape only — TunnelTug reconciles via the k3s API.
+
 
 ## Controller (optional)
 
@@ -40,7 +53,7 @@ Instead of raw YAML, the binary can reconcile the same shape:
   -public 8445 \
   -barge-port-step 1 \
   -barge-lb 165.22.14.101:8444 \
-  -k3s-image tunneltug:dev \
+  -k3s-image hub.tunneltug.com/tunneltug/engine:latest \
   -k3s-kubeconfig /etc/rancher/k3s/k3s.yaml \
   -token "$TOKEN" \
   -domain tunneltug.com \
@@ -54,8 +67,10 @@ Dashboard (controller host): `http://127.0.0.1:4050/_tunneltug/barges`.
 ## Rolling an image (no full fleet kill)
 
 ```bash
-kubectl -n tunneltug set image sts/tunneltug-barge tunneltug=tunneltug:1.2.4
-kubectl -n tunneltug rollout status sts/tunneltug-barge
+# Roll engine image via the controller (re-run with new -k3s-image)
+tunneltug -mode barge -barge-runtime k3s \
+  -k3s-image hub.tunneltug.com/tunneltug/engine:1.2.4 \
+  -token "$TOKEN" ...
 ```
 
 Canary: set `spec.updateStrategy.rollingUpdate.partition` (or `-k3s-update-partition`) so lower ordinals stay on the old revision until you lower partition.

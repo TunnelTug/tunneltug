@@ -65,6 +65,9 @@ type k3sFleetStatus struct {
 	name     string
 	ns       string
 	err      string
+	hubOn    bool
+	hubURL   string
+	sdf      *bargeSDF
 }
 
 func runBargeK3s() {
@@ -74,6 +77,41 @@ func runBargeK3s() {
 	cfg, err := loadK3sBargeConfig()
 	if err != nil {
 		log.Fatalf("Barge k3s configuration error: %v", err)
+	}
+
+	// One-shot: publish a local k3s image to the barge hub, then continue (or exit if only-publish).
+	if src := strings.TrimSpace(*k3sHubPublish); src != "" {
+		dest := cfg.Image
+		if err := publishK3sBargeImage(ctx, src, dest, cfg.Token); err != nil {
+			log.Fatalf("k3s barge hub publish: %v", err)
+		}
+		if *k3sHubPublishOnly {
+			log.Printf("Published %s → %s; exiting (-k3s-hub-publish-only)", src, dest)
+			return
+		}
+	}
+
+	// Image hub is part of this k3s fleet controller (public pull / auth push).
+	hub, err := startK3sBargeHub(ctx, cfg.Token)
+	if err != nil {
+		log.Fatalf("k3s hub: %v", err)
+	}
+	if hub != nil {
+		log.Printf("k3s image hub online public=%s engine=%s", hub.cfg.Public, cfg.Image)
+	}
+
+	// SDF-attested fleet manifests (secure_data_format).
+	sdf, err := newBargeSDF("")
+	if err != nil {
+		log.Printf("SDF fleet manifests unavailable: %v (reconcile continues unsigned)", err)
+		sdf = nil
+	} else {
+		defer sdf.Close()
+	}
+
+	// Ensure engine image is in local k3s/containerd before reconciling pods.
+	if err := ensureK3sBargeImage(ctx, cfg.Image); err != nil {
+		log.Printf("k3s engine image ensure: %v (continuing; kubelet may pull)", err)
 	}
 
 	client, err := newKubernetesClient(strings.TrimSpace(*k3sKubeconfig))
@@ -86,16 +124,57 @@ func runBargeK3s() {
 		image:    cfg.Image,
 		name:     cfg.Name,
 		ns:       cfg.Namespace,
+		hubOn:    k3sHubEnabled(),
+		hubURL:   strings.TrimRight(strings.TrimSpace(*hubPublic), "/"),
+		sdf:      sdf,
 	}
 
-	log.Printf("Starting barge fleet (k3s): %d server replica(s) in %s/%s image %s",
+	log.Printf("Starting k3s fleet (barge mode): %d server replica(s) in %s/%s engine %s",
 		cfg.Replicas, cfg.Namespace, cfg.Name, cfg.Image)
 	if cfg.LBAddr != "" {
 		log.Printf("Pods will self-register with LB %s", cfg.LBAddr)
 	}
+	if k3sHubEnabled() {
+		log.Printf("Image hub embedded in k3s fleet controller listen %s", strings.TrimSpace(*hubListen))
+	}
 
-	if err := reconcileK3sBarge(ctx, client, cfg); err != nil {
+	if err := reconcileK3sBargeSDF(ctx, client, cfg, sdf); err != nil {
 		log.Fatalf("Barge k3s reconcile error: %v", err)
+	}
+
+	// Optional: product apps (williwaw, motionkb, …) via same controller — still no kubectl.
+	if *k3sStack {
+		tag := strings.TrimSpace(*stackTag)
+		if tag == "" {
+			tag = strings.TrimSpace(*hubTag)
+		}
+		if tag == "" {
+			tag = "dev"
+		}
+		stackNS := strings.TrimSpace(*stackNamespace)
+		if stackNS == "" {
+			stackNS = "0trust-stack"
+		}
+		apps, err := parseStackProducts(*stackProducts)
+		if err != nil {
+			log.Printf("k3s-stack products: %v", err)
+		} else {
+			for _, app := range apps {
+				if err := ensureK3sBargeImage(ctx, stackImage(app, tag)); err != nil {
+					log.Printf("k3s-stack pull %s: %v", app.Name, err)
+				}
+			}
+			st := &stackStatus{ns: stackNS, tag: tag, hubOn: k3sHubEnabled()}
+			if err := reconcileProductStack(ctx, client, stackNS, tag, apps, st); err != nil {
+				log.Printf("k3s-stack reconcile: %v", err)
+			} else {
+				log.Printf("k3s-stack online namespace=%s apps=%d (self-contained)", stackNS, len(apps))
+				if !*quiet {
+					go runStackDashboard(ctx, st)
+				}
+				go watchProductStack(ctx, client, stackNS, apps, st)
+			}
+		}
 	}
 
 	if !*quiet {
@@ -114,15 +193,20 @@ func runBargeK3s() {
 			PropagationPolicy: &policy,
 		})
 	} else {
-		log.Println("Barge k3s controller stopped (workloads left running)")
+		log.Println("Barge k3s controller stopped (workloads left running; hub stopped with controller)")
 	}
 }
 
 func loadK3sBargeConfig() (k3sBargeConfig, error) {
+	img := strings.TrimSpace(*k3sImage)
+	if img == "" {
+		img = defaultK3sBargeImage
+		*k3sImage = img
+	}
 	cfg := k3sBargeConfig{
 		Namespace:       strings.TrimSpace(*k3sNamespace),
 		Name:            strings.TrimSpace(*k3sName),
-		Image:           strings.TrimSpace(*k3sImage),
+		Image:           img,
 		Replicas:        int32(*bargeReplicas),
 		HostNetwork:     *k3sHostNetwork,
 		UpdatePartition: int32(*k3sUpdatePartition),
@@ -199,16 +283,53 @@ func restConfigFromKubeconfig(kubeconfig string) (*rest.Config, error) {
 }
 
 func reconcileK3sBarge(ctx context.Context, client kubernetes.Interface, cfg k3sBargeConfig) error {
+	return reconcileK3sBargeSDF(ctx, client, cfg, nil)
+}
+
+func reconcileK3sBargeSDF(ctx context.Context, client kubernetes.Interface, cfg k3sBargeConfig, sdf *bargeSDF) error {
 	if err := ensureK3sNamespace(ctx, client, cfg.Namespace); err != nil {
 		return err
 	}
-	if err := ensureK3sConfigMap(ctx, client, cfg); err != nil {
+
+	// Resolve image digest from local k3s, then SDF-sign fleet shape + image identity.
+	deployImage := cfg.Image
+	var sdfToken, sdfRoot, imageDigest string
+	if sdf != nil {
+		att, err := resolveImageAttestation(ctx, cfg.Image)
+		if err != nil {
+			log.Printf("SDF image digest: %v (signing fleet shape only if possible)", err)
+			// Still try sign — SignFleetReconcileWithImage requires digest; fall back without.
+		} else {
+			imageDigest = att.Digest
+			// Prefer digest-pinned image for the StatefulSet so kubelet cannot drift on tag.
+			if att.Pinned != "" {
+				deployImage = att.Pinned
+			}
+			tok, root, serr := sdf.SignFleetReconcileWithImage(ctx, cfg, att)
+			if serr != nil {
+				log.Printf("SDF manifest (fleet+image): %v", serr)
+			} else {
+				sdfToken, sdfRoot = tok, root
+				// Continuous integrity check
+				if ok, detail, verr := sdf.VerifyImage(ctx); verr != nil || !ok {
+					log.Printf("SDF image verify FAILED: %v detail=%v", verr, detail)
+				} else if !*quiet {
+					log.Printf("SDF image verify OK digest=%s", truncateMid(imageDigest, 19))
+				}
+			}
+		}
+	}
+
+	cfgDeploy := cfg
+	cfgDeploy.Image = deployImage
+
+	if err := ensureK3sConfigMapSDF(ctx, client, cfgDeploy, sdfToken, sdfRoot, imageDigest); err != nil {
 		return err
 	}
 	if err := ensureK3sHeadlessService(ctx, client, cfg); err != nil {
 		return err
 	}
-	return ensureK3sStatefulSet(ctx, client, cfg)
+	return ensureK3sStatefulSetSDF(ctx, client, cfgDeploy, sdfToken, sdfRoot, imageDigest)
 }
 
 func ensureK3sHeadlessService(ctx context.Context, client kubernetes.Interface, cfg k3sBargeConfig) error {
@@ -253,7 +374,11 @@ func ensureK3sNamespace(ctx context.Context, client kubernetes.Interface, name s
 }
 
 func ensureK3sConfigMap(ctx context.Context, client kubernetes.Interface, cfg k3sBargeConfig) error {
-	cm := buildBargeConfigMap(cfg)
+	return ensureK3sConfigMapSDF(ctx, client, cfg, "", "", "")
+}
+
+func ensureK3sConfigMapSDF(ctx context.Context, client kubernetes.Interface, cfg k3sBargeConfig, sdfToken, sdfRoot, imageDigest string) error {
+	cm := buildBargeConfigMapSDF(cfg, sdfToken, sdfRoot, imageDigest)
 	existing, err := client.CoreV1().ConfigMaps(cfg.Namespace).Get(ctx, cm.Name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		_, err = client.CoreV1().ConfigMaps(cfg.Namespace).Create(ctx, cm, metav1.CreateOptions{})
@@ -264,12 +389,33 @@ func ensureK3sConfigMap(ctx context.Context, client kubernetes.Interface, cfg k3
 	}
 	existing.Data = cm.Data
 	existing.Labels = cm.Labels
+	existing.Annotations = cm.Annotations
 	_, err = client.CoreV1().ConfigMaps(cfg.Namespace).Update(ctx, existing, metav1.UpdateOptions{})
 	return err
 }
 
 func ensureK3sStatefulSet(ctx context.Context, client kubernetes.Interface, cfg k3sBargeConfig) error {
+	return ensureK3sStatefulSetSDF(ctx, client, cfg, "", "", "")
+}
+
+func ensureK3sStatefulSetSDF(ctx context.Context, client kubernetes.Interface, cfg k3sBargeConfig, sdfToken, sdfRoot, imageDigest string) error {
 	desired := buildBargeStatefulSet(cfg)
+	if desired.Annotations == nil {
+		desired.Annotations = map[string]string{}
+	}
+	desired.Annotations["tunneltug.io/format"] = "secure_data_format"
+	desired.Annotations["tunneltug.io/integrity"] = "image+fleet"
+	if sdfRoot != "" {
+		desired.Annotations["tunneltug.io/sdf-state-root"] = sdfRoot
+	}
+	if imageDigest != "" {
+		desired.Annotations["tunneltug.io/image-digest"] = imageDigest
+	}
+	if sdfToken != "" {
+		if jti := extractJWTClaim(sdfToken, "jti"); jti != "" {
+			desired.Annotations["tunneltug.io/sdf-jti"] = jti
+		}
+	}
 	existing, err := client.AppsV1().StatefulSets(cfg.Namespace).Get(ctx, desired.Name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		_, err = client.AppsV1().StatefulSets(cfg.Namespace).Create(ctx, desired, metav1.CreateOptions{})
@@ -288,6 +434,12 @@ func ensureK3sStatefulSet(ctx context.Context, client kubernetes.Interface, cfg 
 	existing.Spec.Template = desired.Spec.Template
 	existing.Spec.UpdateStrategy = desired.Spec.UpdateStrategy
 	existing.Labels = desired.Labels
+	if existing.Annotations == nil {
+		existing.Annotations = map[string]string{}
+	}
+	for k, v := range desired.Annotations {
+		existing.Annotations[k] = v
+	}
 	_, err = client.AppsV1().StatefulSets(cfg.Namespace).Update(ctx, existing, metav1.UpdateOptions{})
 	return err
 }
@@ -359,22 +511,50 @@ func requestK3sPodSnapshots(ctx context.Context, client kubernetes.Interface, cf
 }
 
 func buildBargeConfigMap(cfg k3sBargeConfig) *corev1.ConfigMap {
+	return buildBargeConfigMapSDF(cfg, "", "", "")
+}
+
+func buildBargeConfigMapSDF(cfg k3sBargeConfig, sdfToken, sdfRoot, imageDigest string) *corev1.ConfigMap {
+	data := map[string]string{
+		"token":           cfg.Token,
+		"domain":          cfg.Domain,
+		"lb":              cfg.LBAddr,
+		"fleet_id":        cfg.FleetID,
+		"control_base":    cfg.ControlBase,
+		"public_base":     cfg.PublicBase,
+		"port_step":       strconv.Itoa(cfg.PortStep),
+		"logic_namespace": cfg.NamespaceLogic,
+		"image":           cfg.Image,
+		"replicas":        strconv.Itoa(int(cfg.Replicas)),
+		"runtime":         "k3s",
+		// Integrity: digest proves image bytes; SDF token binds fleet+digest.
+		"integrity": "image_digest+fleet_shape",
+	}
+	anns := map[string]string{
+		"tunneltug.io/runtime":   "k3s",
+		"tunneltug.io/format":    "secure_data_format",
+		"tunneltug.io/integrity": "image+fleet",
+	}
+	if imageDigest != "" {
+		data["image_digest"] = imageDigest
+		anns["tunneltug.io/image-digest"] = imageDigest
+	}
+	if sdfToken != "" {
+		data["sdf_manifest"] = sdfToken
+		data["sdf_state_root"] = sdfRoot
+		anns["tunneltug.io/sdf-state-root"] = sdfRoot
+		if jti := extractJWTClaim(sdfToken, "jti"); jti != "" {
+			anns["tunneltug.io/sdf-jti"] = jti
+		}
+	}
 	return &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      cfg.Name + "-config",
-			Namespace: cfg.Namespace,
-			Labels:    bargeK3sLabels(cfg),
+			Name:        cfg.Name + "-config",
+			Namespace:   cfg.Namespace,
+			Labels:      bargeK3sLabels(cfg),
+			Annotations: anns,
 		},
-		Data: map[string]string{
-			"token":           cfg.Token,
-			"domain":          cfg.Domain,
-			"lb":              cfg.LBAddr,
-			"fleet_id":        cfg.FleetID,
-			"control_base":    cfg.ControlBase,
-			"public_base":     cfg.PublicBase,
-			"port_step":       strconv.Itoa(cfg.PortStep),
-			"logic_namespace": cfg.NamespaceLogic,
-		},
+		Data: data,
 	}
 }
 
@@ -420,8 +600,10 @@ func buildBargeStatefulSet(cfg k3sBargeConfig) *appsv1.StatefulSet {
 		Containers: []corev1.Container{
 			{
 				Name:            "tunneltug",
-				Image:           cfg.Image,
-				ImagePullPolicy: corev1.PullIfNotPresent,
+				Image: cfg.Image,
+				// Hub images: controller pre-pulls via k3s ctr; IfNotPresent avoids thrash.
+				// Always re-pull when image is the default hub tag so rolls pick up latest.
+				ImagePullPolicy: k3sImagePullPolicy(cfg.Image),
 				Args:            args,
 				Env:             env,
 				Ports: []corev1.ContainerPort{
@@ -486,6 +668,19 @@ func buildBargeStatefulSet(cfg k3sBargeConfig) *appsv1.StatefulSet {
 func hostPathDirOrCreate() *corev1.HostPathType {
 	t := corev1.HostPathDirectoryOrCreate
 	return &t
+}
+
+func k3sImagePullPolicy(image string) corev1.PullPolicy {
+	// Floating hub tags should re-check the registry; digests / local tags stay pinned.
+	if strings.Contains(image, "hub.tunneltug.com/") && (strings.HasSuffix(image, ":latest") || strings.Contains(image, "/tunneltug/engine") || strings.Contains(image, "/tunneltug/barge")) && !strings.Contains(image, "@sha256:") {
+		if strings.HasSuffix(image, ":latest") || strings.Contains(image, "/tunneltug/") {
+			return corev1.PullAlways
+		}
+	}
+	if strings.Contains(image, "hub.tunneltug.com/") && strings.HasSuffix(image, ":latest") {
+		return corev1.PullAlways
+	}
+	return corev1.PullIfNotPresent
 }
 
 func buildK3sServerArgs(cfg k3sBargeConfig) []string {
@@ -644,16 +839,32 @@ func runK3sBargeDashboard(ctx context.Context, status *k3sFleetStatus) {
 		defer status.mu.RUnlock()
 		w.Header().Set("Content-Type", "application/json")
 		payload := map[string]any{
-			"status":   "ok",
-			"mode":     "barge",
-			"runtime":  "k3s",
-			"service":  "server",
-			"replicas": status.replicas,
-			"running":  status.ready,
-			"image":    status.image,
-			"name":     status.name,
+			"status":    "ok",
+			"mode":      "barge",
+			"runtime":   "k3s",
+			"service":   "server",
+			"replicas":  status.replicas,
+			"running":   status.ready,
+			"image":     status.image,
+			"name":      status.name,
 			"namespace": status.ns,
-			"barges":   status.pods,
+			"barges":    status.pods,
+			"hub": map[string]any{
+				"enabled": status.hubOn,
+				"public":  status.hubURL,
+				"listen":  strings.TrimSpace(*hubListen),
+				"pull":    "public",
+				"push":    "authenticated",
+				"layer":   "k3s-fleet",
+			},
+			"sdf_manifest": func() map[string]any {
+				if status.sdf != nil {
+					// Re-verify image on each status poll so tampering is visible.
+					_, _, _ = status.sdf.VerifyImage(r.Context())
+					return status.sdf.Status()
+				}
+				return map[string]any{"enabled": false}
+			}(),
 		}
 		if status.err != "" {
 			payload["error"] = status.err
@@ -672,11 +883,17 @@ func runK3sBargeDashboard(ctx context.Context, status *k3sFleetStatus) {
 		ns := status.ns
 		name := status.name
 		errMsg := status.err
+		img := status.image
+		hubOn := status.hubOn
+		hubURL := status.hubURL
 		status.mu.RUnlock()
 
 		w.Header().Set("Content-Type", "text/html")
 		fmt.Fprintf(w, `<html><body><h2>TunnelTug Barge Fleet (k3s)</h2>`)
-		fmt.Fprintf(w, `<p>StatefulSet: %s/%s | Ready: %d/%d | <a href="/_tunneltug/barges">JSON</a></p>`, ns, name, ready, replicas)
+		fmt.Fprintf(w, `<p>StatefulSet: %s/%s | Ready: %d/%d | Image: <code>%s</code> | <a href="/_tunneltug/barges">JSON</a></p>`, ns, name, ready, replicas, img)
+		if hubOn {
+			fmt.Fprintf(w, `<p>Image hub (built into k3s layer): <code>%s</code> listen <code>%s</code> — public pull, auth push</p>`, hubURL, strings.TrimSpace(*hubListen))
+		}
 		if errMsg != "" {
 			fmt.Fprintf(w, `<p style="color:red">Error: %s</p>`, errMsg)
 		}

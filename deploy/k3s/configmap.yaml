@@ -7,8 +7,9 @@ metadata:
     app.kubernetes.io/name: tunneltug-barge
     app.kubernetes.io/component: barge
 data:
-  # Edit before apply. Prefer secrets for token in production.
-  token: "replace-with-shared-token"
+  # Prefer a Kubernetes Secret for the token in production.
+  # Mint with: tunneltug -gen-token  (crypto/rand, 256-bit hex). Never use weak defaults.
+  token: "replace-with-cryptographic-token"
   domain: "tunneltug.com"
   lb: "165.22.14.101:8444"
   fleet_id: "tunneltug"

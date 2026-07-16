@@ -12,7 +12,8 @@ func resetFlags(t *testing.T) {
 	*prod = false
 	*dev = false
 	*domain = ""
-	*authToken = "this-is-a-valid-token"
+	// 32+ chars so ensureAuthToken accepts it without auto-mint.
+	*authToken = "this-is-a-valid-token-32chars!!"
 	*publicPort = "8080"
 	*controlPort = "9000"
 	*dashPort = "4040"
@@ -63,8 +64,49 @@ func TestValidateConfig_RejectsWeakProdToken(t *testing.T) {
 	*authToken = "short"
 
 	err := validateConfig()
-	if err == nil || !strings.Contains(err.Error(), "at least 16") {
-		t.Fatalf("expected prod token length error, got %v", err)
+	if err == nil {
+		t.Fatal("expected prod token error")
+	}
+	// Empty/weak tokens fail either as required-in-prod or too-weak.
+	if !strings.Contains(err.Error(), "token") && !strings.Contains(err.Error(), "weak") && !strings.Contains(err.Error(), "at least") {
+		t.Fatalf("expected token-related error, got %v", err)
+	}
+}
+
+func TestValidateConfig_RejectsKnownWeakToken(t *testing.T) {
+	resetFlags(t)
+	*authToken = "secret123"
+	err := validateConfig()
+	// secret123 is cleared path: empty default weak → auto-mint in non-prod succeeds.
+	// Force weak non-empty known default after ensure would reject if not cleared.
+	*authToken = "0trust-tunnel-prod-secret"
+	err = validateConfig()
+	if err == nil {
+		t.Fatal("expected known weak token rejection")
+	}
+}
+
+func TestValidateConfig_HubMode(t *testing.T) {
+	resetFlags(t)
+	*mode = "hub"
+	*authToken = "this-is-a-valid-token-32chars!!"
+	*hubBucket = "tunneltug-hub"
+	if err := validateConfig(); err != nil {
+		t.Fatalf("hub config: %v", err)
+	}
+}
+
+func TestGenerateSecureToken(t *testing.T) {
+	a, err := GenerateSecureToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := GenerateSecureToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a == b || len(a) != 64 {
+		t.Fatalf("bad tokens a=%q b=%q", a, b)
 	}
 }
 

@@ -1,0 +1,6 @@
+name: servicekeys
+replicas: 1
+# port: 8468
+# domain: keys.example.com
+env:
+  TRUST_PRODUCT: servicekeys

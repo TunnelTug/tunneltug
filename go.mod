@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 TunnelTug Contributors
+
 module tunneltug
 
 go 1.25.10
@@ -8,6 +11,7 @@ require (
 	github.com/0TrustCloud/secure_dns v1.0.3
 	github.com/0TrustCloud/secure_registrar v1.0.1
 	github.com/0TrustCloud/ultimate_db v1.3.6
+	github.com/0TrustCloud/ultimate_keystore v1.0.1
 	github.com/hashicorp/yamux v0.1.2
 	github.com/quic-go/quic-go v0.59.1
 	golang.org/x/crypto v0.53.0
@@ -78,3 +82,7 @@ require (
 	sigs.k8s.io/structured-merge-diff/v4 v4.4.2 // indirect
 	sigs.k8s.io/yaml v1.4.0 // indirect
 )
+
+replace github.com/0TrustCloud/ultimate_db => ../0TrustCloud/modules/ultimate_db
+
+replace github.com/0TrustCloud/ultimate_keystore => ../0TrustCloud/modules/ultimate_keystore

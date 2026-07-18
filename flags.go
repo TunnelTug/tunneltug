@@ -13,7 +13,7 @@ import (
 const defaultTunnelKey = "default"
 
 var (
-	mode         = flag.String("mode", "client", "Run mode: 'server', 'client', 'lb', 'barge', 'orchestrator', 'anycast', 'hub', 'hub-publish', or 'stack'")
+	mode         = flag.String("mode", "client", "Run mode: 'server', 'client', 'lb', 'barge', 'orchestrator', 'anycast', 'hub', 'hub-publish', 'stack', 'ultimate_db', or 'ultimate_keystore'")
 	protocol     = flag.String("proto", "quic", "Control transport protocol: 'quic' (UDP)")
 	routing      = flag.String("routing", "subdomain", "Routing mode: 'subdomain' (host-based) or 'direct' (single tunnel, no subdomain)")
 	serverIP     = flag.String("server", "127.0.0.1", "Server IP (client mode)")
@@ -123,17 +123,43 @@ var (
 	hubBucket  = flag.String("hub-bucket", "tunneltug-hub", "S3 bucket for image storage")
 	hubMemory  = flag.Bool("hub-memory", false, "In-memory hub store (dev/tests only)")
 	// Multi-product publish: 0trust apps + tunneltug engine (or "all"). "barge" is a legacy alias for tunneltug.
-	hubProducts = flag.String("hub-products", "all", "Products for -mode hub-publish: mail,search,platform,services,social,tunneltug|all")
+	hubProducts = flag.String("hub-products", "all", "Products for -mode hub-publish: apps, name, platform faces (auth,iam,access,…), orchid_ingest, tunneltug|all")
 	hubTag      = flag.String("hub-tag", "latest", "Image tag for -mode hub-publish / stack")
 	hubHost     = flag.String("hub-host", "hub.tunneltug.com", "Registry host for -mode hub-publish (no scheme)")
+	// When local k3s does not already have the image, pack a binary from this dist tree and push via the hub API.
+	// Layout: <hub-dist>/<product>/product (linux amd64). Built-in path — no docker/crane.
+	hubDist = flag.String("hub-dist", "", "Product binary tree for hub-publish (e.g. 0TrustCloud/deploy/oci/dist)")
 
 	// Product stack: self-contained k3s Deployments (williwaw, motionkb, …) — no kubectl.
-	stackProducts  = flag.String("stack-products", "social,ack,williwaw,motionkb,mail,search", "Comma-separated apps for -mode stack (or all)")
+	stackProducts  = flag.String("stack-products", "social,ack,williwaw,motionkb,mail,search,name,dbsc_relay,anycast,orchid_ingest", "Comma-separated apps for -mode stack (or all)")
 	stackNamespace = flag.String("stack-namespace", "0trust-stack", "k3s namespace for product stack")
 	stackTag       = flag.String("stack-tag", "", "Image tag for stack apps (default: -hub-tag or dev)")
 	stackDashPort  = flag.String("stack-dash", "4070", "Product stack dashboard port")
+	// YAML config: each barge is configurable (replicas, env, image, config_file mount).
+	// SRE: tunneltug -mode stack -stack-config config/stack.yaml
+	//      tunneltug -mode barge -k3s-stack -barge-config config/stack.yaml
+	stackConfig = flag.String("stack-config", "", "YAML/JSON stack file listing configurable product barges (see config/stack.example.yaml)")
+	bargeConfig = flag.String("barge-config", "", "Alias for -stack-config (SRE wording: load the barge with the yaml config)")
 	// When true, barge k3s mode also reconciles the product stack in-process.
 	k3sStack = flag.Bool("k3s-stack", false, "With -mode barge -barge-runtime k3s: also run product stack reconcile (no kubectl)")
+
+	// Kernel data-replication barges: peer endpoints for product service data
+	// replication (local embeds stay; AddPeer — do not prefer-remote over local).
+	// YAML: node_id / peers on ultimate_db (config/barges/ultimate_db.example.yaml).
+	udbListen  = flag.String("udb-listen", ":8480", "Listen address for -mode ultimate_db kernel replication barge")
+	udbDataDir = flag.String("udb-data", "", "Data dir for ultimate_db replication barge (default: ~/.tunneltug/kernel/ultimate_db)")
+	udbNodeID  = flag.String("udb-node-id", "ultimate-db", "Node id for ultimate_db kernel replication barge")
+	udbPeers   = flag.String("udb-peers", "", "Kernel replication peers id=url,id2=url for scatter-gather")
+	uksListen  = flag.String("uks-listen", ":8481", "Listen address for -mode ultimate_keystore kernel replication barge")
+	uksDataDir = flag.String("uks-data", "", "Data dir for ultimate_keystore replication barge (default: ~/.tunneltug/kernel/ultimate_keystore)")
+	uksNodeID  = flag.String("uks-node-id", "ultimate-keystore", "Node id for ultimate_keystore kernel replication barge")
+
+	// Site config: multi-PoP YAML or Junos-like Tugconf (.tug / set lines).
+	// Complex global ingress + kernel mesh in one document.
+	siteConfigFlag    = flag.String("config", "", "Site config path: YAML or Tugconf (.tug/.set); TUNNELTUG_CONFIG")
+	sitePopFlag       = flag.String("pop", "", "PoP id when site has pops[] (TUNNELTUG_POP)")
+	siteConfigCheck   = flag.Bool("config-check", false, "Load site config, expand kernel peers, print run plan, exit")
+	siteConfigShowSet = flag.Bool("config-show-set", false, "Print site config as Junos-like set lines, exit")
 )
 
 type certProvider struct {

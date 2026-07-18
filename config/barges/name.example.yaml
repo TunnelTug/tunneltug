@@ -1,0 +1,8 @@
+# 0Trust Name (gTLD face) barge — set domain in YAML for your brand face.
+name: name
+replicas: 1
+# port: 8447
+# domain: name.example.com
+# public_url: https://name.example.com
+env:
+  TRUST_PRODUCT: "0trust.name"

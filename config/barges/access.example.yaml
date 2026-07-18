@@ -1,0 +1,6 @@
+name: access
+replicas: 1
+# port: 8462
+# domain: access.example.com
+env:
+  TRUST_PRODUCT: access

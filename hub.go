@@ -101,6 +101,7 @@ func (h *hubServer) handler() http.Handler {
 	mux.HandleFunc("/v2/", h.handleV2)
 	mux.HandleFunc("/v2", h.handleV2Root)
 	mux.HandleFunc("/_tunneltug/hub/health", h.handleHealth)
+	mux.HandleFunc("/_tunneltug/hub/catalog", h.handleCatalogAPI)
 	mux.HandleFunc("/", h.handleIndex)
 	return h.withCORS(mux)
 }
@@ -117,28 +118,13 @@ func (h *hubServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"push":    "authenticated",
 		"memory":  h.cfg.Memory,
 		"image":   defaultK3sBargeImage,
+		"license": "MIT",
+		"spdx":    "MIT",
+		"license_url": "https://github.com/TunnelTug/tunneltug/blob/main/LICENSE",
 	})
 }
 
-func (h *hubServer) handleIndex(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" {
-		http.NotFound(w, r)
-		return
-	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprintf(w, `<!doctype html><html><head><title>TunnelTug k3s barge hub</title></head><body>
-<h1>TunnelTug k3s barge image hub</h1>
-<p>Built into the <code>-mode barge -barge-runtime k3s</code> controller. Public pull · authenticated push. Blobs on 0trust.social S3.</p>
-<ul>
-<li>Registry: <code>%s</code></li>
-<li>Default image: <code>%s</code></li>
-<li>Health: <a href="/_tunneltug/hub/health">/_tunneltug/hub/health</a></li>
-<li>API: <a href="/v2/">/v2/</a></li>
-<li>Storage: %s/s3/%s</li>
-</ul>
-<p>k3s pulls this registry automatically via the barge controller (<code>k3s ctr</code>).</p>
-</body></html>`, h.cfg.Public, defaultK3sBargeImage, h.cfg.S3URL, h.cfg.Bucket)
-}
+// handleIndex is implemented in hub_index.go (architectures + config builder modal).
 
 // startHubHTTPServer runs the OCI registry. Used by the k3s barge layer (primary)
 // and by -mode hub (standalone face only).

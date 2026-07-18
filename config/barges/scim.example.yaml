@@ -1,0 +1,6 @@
+name: scim
+replicas: 1
+# port: 8463
+# domain: scim.example.com
+env:
+  TRUST_PRODUCT: scim

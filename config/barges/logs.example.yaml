@@ -1,0 +1,6 @@
+name: logs
+replicas: 1
+# port: 8470
+# domain: logs.example.com
+env:
+  TRUST_PRODUCT: logs

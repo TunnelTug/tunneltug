@@ -1,5 +1,11 @@
 # Image hub — embedded in TunnelTug k3s fleets
 
+**License:** MIT — see the repository [LICENSE](../../LICENSE).
+
+**Public UI:** [hub.tunneltug.com](https://hub.tunneltug.com) — architecture catalog, product cards, and a **config builder modal** (YAML + Tugconf) with **Scale & link** for replicas, linked services, and multi-instance layouts. API: `GET /_tunneltug/hub/catalog`.
+
+Architectures & resilient designs: [docs/ARCHITECTURES.md](../../docs/ARCHITECTURES.md).
+
 **Barge** = TunnelTug running a **k3s fleet** (`-mode barge -barge-runtime k3s`).  
 Not a product. The hub and the **engine image** are how that fleet gets its pods.
 
@@ -70,20 +76,32 @@ Same registry hosts **0Trust apps** and the **TunnelTug engine**:
 | Ack | `hub.tunneltug.com/0trust/ack:<tag>` |
 | Williwaw | `hub.tunneltug.com/0trust/williwaw:<tag>` |
 | MotionKB | `hub.tunneltug.com/0trust/motionkb:<tag>` |
+| 0Trust Name (gTLD) | `hub.tunneltug.com/0trust/name:<tag>` |
+| DBSC Relay | `hub.tunneltug.com/0trust/dbsc-relay:<tag>` |
+| Anycast edge | `hub.tunneltug.com/0trust/anycast:<tag>` |
+| Orchid Sync Ingest | `hub.tunneltug.com/0trust/orchid-ingest:<tag>` |
+| 0Trust Auth / IAM / Access / SCIM / PKI / … | `hub.tunneltug.com/0trust/<face>:<tag>` |
+| Ultimate DB (kernel) | `hub.tunneltug.com/0trust/ultimate-db:<tag>` |
+| Ultimate Keystore (kernel) | `hub.tunneltug.com/0trust/ultimate-keystore:<tag>` |
 | TunnelTug engine (k3s fleet pods) | `hub.tunneltug.com/tunneltug/engine:<tag>` |
 
+Platform faces (`auth`, `iam`, `access`, `scim`, `pki`, `workflows`, `topology`, `nameservice`, `servicekeys`, `vpi`, `logs`) are individual barges that run the platform binary with `TRUST_PRODUCT` set.
+
 ```bash
+# Prefer: images already in local k3s → k3s ctr push
+# Fallback: pack binaries from -hub-dist and push via the hub Registry API
 tunneltug -mode hub-publish \
-  -hub-products mail,search,platform,services,social,tunneltug \
-  -hub-tag dev \
+  -hub-products name,dbsc_relay,anycast,orchid_ingest,williwaw,motionkb,ack,tunneltug \
+  -hub-tag latest \
+  -hub-dist /path/to/0TrustCloud/deploy/oci/dist \
   -token "$TUNNELTUG_TOKEN"
 ```
 
-Build: `0TrustCloud/deploy/oci/build-and-publish.sh`.  
+Build linux binaries into `deploy/oci/dist/<product>/product`, then hub-publish (TunnelTug only — no docker/crane).
 
 ```bash
 # Product apps — self-contained (client-go), no kubectl
-tunneltug -mode stack -stack-products williwaw,motionkb,ack,social -token "$TOKEN"
+tunneltug -mode stack -stack-products williwaw,motionkb,ack,name,dbsc_relay,anycast,orchid_ingest,social -token "$TOKEN"
 
 # Or co-run with tunnel fleet
 tunneltug -mode barge -barge-runtime k3s -k3s-stack -stack-products williwaw,motionkb ...

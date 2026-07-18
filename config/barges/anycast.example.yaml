@@ -1,0 +1,7 @@
+# Anycast edge barge — edge config is always YAML (no hardcoded zones/domains).
+name: anycast
+replicas: 1
+# port: 9099
+config_file: ../anycast.example.yaml
+config_mount: /config
+config_key: anycast.yaml

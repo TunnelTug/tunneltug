@@ -14,6 +14,12 @@ const defaultWeakToken = "secret123"
 var subdomainPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
 
 func applyEnvDefaults() {
+	if v := strings.TrimSpace(os.Getenv("TUNNELTUG_CONFIG")); v != "" && strings.TrimSpace(*siteConfigFlag) == "" {
+		*siteConfigFlag = v
+	}
+	if v := strings.TrimSpace(os.Getenv("TUNNELTUG_POP")); v != "" && strings.TrimSpace(*sitePopFlag) == "" {
+		*sitePopFlag = v
+	}
 	if v := strings.TrimSpace(os.Getenv("TUNNELTUG_TOKEN")); v != "" {
 		// Only accept cryptographically strong env tokens; weak values are ignored
 		// so ensureAuthToken can mint a secure one (or fail in -prod).
@@ -56,6 +62,12 @@ func applyEnvDefaults() {
 	}
 	if v := strings.TrimSpace(os.Getenv("TUNNELTUG_STACK_TAG")); v != "" {
 		*stackTag = v
+	}
+	if v := strings.TrimSpace(os.Getenv("TUNNELTUG_STACK_CONFIG")); v != "" && strings.TrimSpace(*stackConfig) == "" {
+		*stackConfig = v
+	}
+	if v := strings.TrimSpace(os.Getenv("TUNNELTUG_BARGE_CONFIG")); v != "" && strings.TrimSpace(*bargeConfig) == "" {
+		*bargeConfig = v
 	}
 	if envTruthy("TUNNELTUG_K3S_STACK") {
 		*k3sStack = true
@@ -222,8 +234,8 @@ func envTruthy(key string) bool {
 
 func validateConfig() error {
 	modeVal := strings.ToLower(strings.TrimSpace(*mode))
-	if modeVal != "server" && modeVal != "client" && modeVal != "lb" && modeVal != "barge" && modeVal != "orchestrator" && modeVal != "anycast" && modeVal != "hub" && modeVal != "hub-publish" && modeVal != "stack" {
-		return fmt.Errorf("invalid -mode %q: use server, client, lb, barge, orchestrator, anycast, hub, hub-publish, or stack", *mode)
+	if modeVal != "server" && modeVal != "client" && modeVal != "lb" && modeVal != "barge" && modeVal != "orchestrator" && modeVal != "anycast" && modeVal != "hub" && modeVal != "hub-publish" && modeVal != "stack" && modeVal != "ultimate_db" && modeVal != "ultimate-db" && modeVal != "ultimate_keystore" && modeVal != "ultimate-keystore" {
+		return fmt.Errorf("invalid -mode %q: use server, client, lb, barge, orchestrator, anycast, hub, hub-publish, stack, ultimate_db, or ultimate_keystore", *mode)
 	}
 
 	// Standalone anycast edge: only validate anycast YAML (no tunnel token/ports).
@@ -257,12 +269,24 @@ func validateConfig() error {
 		}
 		return nil
 	}
+	// Dedicated ultimate_db / ultimate_keystore kernel barges (own data, not mesh/SDF).
+	if modeVal == "ultimate_db" || modeVal == "ultimate-db" || modeVal == "ultimate_keystore" || modeVal == "ultimate-keystore" {
+		if err := ensureAuthToken(); err != nil {
+			return err
+		}
+		return nil
+	}
+
 	// Product stack: Deployments/Services via client-go (self-contained, no kubectl).
 	if modeVal == "stack" {
 		if err := ensureAuthToken(); err != nil {
 			return err
 		}
-		if _, err := parseStackProducts(*stackProducts); err != nil {
+		if cfgPath := stackConfigPath(); cfgPath != "" {
+			if _, err := loadStackConfig(cfgPath); err != nil {
+				return fmt.Errorf("stack-config: %w", err)
+			}
+		} else if _, err := parseStackProducts(*stackProducts); err != nil {
 			return err
 		}
 		if err := validatePort("stack-dash", *stackDashPort); err != nil {

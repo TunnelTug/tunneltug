@@ -1,0 +1,8 @@
+# 0Trust Social / CDN barge
+name: social
+replicas: 2
+# port: 3085
+# domain: cdn.example.com
+# public_url: https://cdn.example.com
+env:
+  SOCIAL_LOG_LEVEL: info

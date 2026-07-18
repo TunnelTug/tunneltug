@@ -1,0 +1,8 @@
+# MeshSearch barge
+name: search
+replicas: 1
+# port: 3087
+# domain: search.example.com
+# public_url: https://search.example.com
+env:
+  SEARCH_LOG_LEVEL: info

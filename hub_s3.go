@@ -49,9 +49,14 @@ func (s *s3HubStore) Put(key string, data []byte, contentType string) error {
 	if s.token != "" {
 		req.Header.Set("Authorization", "Bearer "+s.token)
 	}
-	// Trusted product proxy headers for social CDN when configured as S2S.
+	// S2S to 0trust.social: same contract as product_otrust / socialcdn proxies.
+	// Edge terminates TLS so social sees loopback/trusted; APISession honors
+	// X-0Trust-Subject when X-0Trust-DBSC=bound (no browser cookie required).
 	req.Header.Set("X-0Trust-Consumer", "tunneltug-hub")
+	req.Header.Set("X-0Trust-Subject", "tunneltug-hub")
+	req.Header.Set("X-0Trust-DBSC", "bound")
 	req.Header.Set("X-Requested-With", "fetch")
+	req.Header.Set("Accept", "application/json")
 
 	resp, err := s.http.Do(req)
 	if err != nil {

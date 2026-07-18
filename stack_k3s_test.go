@@ -14,7 +14,7 @@ func TestParseStackProducts_Default(t *testing.T) {
 	for _, a := range apps {
 		names[a.Name] = true
 	}
-	for _, want := range []string{"williwaw", "motionkb", "ack", "social"} {
+	for _, want := range []string{"williwaw", "motionkb", "ack", "social", "orchid-ingest"} {
 		if !names[want] {
 			t.Fatalf("default stack missing %s: %v", want, names)
 		}

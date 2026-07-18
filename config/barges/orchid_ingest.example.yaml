@@ -1,0 +1,6 @@
+# Orchid sync ingest barge
+name: orchid_ingest
+replicas: 1
+# port: 8451
+# domain: orchid.example.com
+# public_url: https://orchid.example.com

@@ -1,0 +1,8 @@
+# Ack (event chat) barge
+name: ack
+replicas: 1
+# port: 3083
+# domain: chat.example.com
+# public_url: https://chat.example.com
+env:
+  ACK_LOG_LEVEL: info

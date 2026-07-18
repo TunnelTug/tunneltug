@@ -1,0 +1,6 @@
+name: pki
+replicas: 1
+# port: 8464
+# domain: pki.example.com
+env:
+  TRUST_PRODUCT: pki

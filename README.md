@@ -1,6 +1,12 @@
 # TunnelTug
 
-TunnelTug exposes local HTTP services to the internet through a **QUIC control tunnel** and a **streaming-optimized public ingress**. It supports subdomain and direct routing, HTTPS + HTTP/3, product **vhosts**, load-balanced **barges**, **mesh** registration, and namespace orchestration.
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
+**TunnelTug scales from local development to geo-distributed anycast production ingress — with real-time data sync across global edges.**
+
+It exposes local HTTP services through a **QUIC control tunnel** and a **streaming-optimized public edge**, then grows into load-balanced **barges**, k3s fleets, product **vhosts**, **mesh** registration, multi-region **anycast**, and a **kernel replication plane** so every ingress keeps local data *and* stays in sync worldwide—without changing how you ship.
+
+**License:** [MIT](LICENSE) — free to use, modify, and distribute.
 
 ## Features
 
@@ -30,6 +36,30 @@ flowchart LR
   Server <-->|QUIC + Yamux| Client[Tunnel client]
   Client -->|TCP| Local[Local app :3000]
 ```
+
+### Scale-out idea: global ingresses + real-time sync
+
+| Layer | Job |
+|-------|-----|
+| **Anycast / multi-PoP ingress** | Users hit the nearest edge (BGP health-gated DNS, LB, barge fleets) |
+| **Local embeds** | Each product barge serves from local ultimate_db / keystore (low latency) |
+| **Kernel replication barges** | Peers across regions; products `AddPeer` so service data **replicates in real time** |
+| **Not** | One central remote DB that edges “prefer over” local |
+
+```mermaid
+flowchart TB
+  U[Users worldwide]
+  U --> A1[Ingress PoP A]
+  U --> A2[Ingress PoP B]
+  A1 --> P1[Product barges + local embeds]
+  A2 --> P2[Product barges + local embeds]
+  P1 <-->|kernel NetworkTransport /kernel/*| K[Kernel replication mesh]
+  P2 <-->|real-time peer sync| K
+  K --- K1[ultimate_db node A]
+  K --- K2[ultimate_db node B]
+```
+
+YAML `domain` / stack config per PoP; kernel `node_id` + `peers` wire the replication mesh so scale-out is more ingresses, not a single shared primary.
 
 | Port | Protocol | Purpose |
 |------|----------|---------|
@@ -436,6 +466,11 @@ Optional `auth_proxy: true` proxies `/auth/*`, `/samln/*`, and related IdP paths
 | `-k3s-namespace` | `tunneltug` | Workload namespace |
 | `-k3s-host-network` | `true` | hostNetwork for QUIC (recommended) |
 | `-k3s-cleanup` | `false` | Delete StatefulSet when controller exits |
+| `-k3s-stack` | `false` | With barge k3s: also reconcile product stack |
+| `-stack-config` | — | YAML listing configurable product barges (see `config/stack.example.yaml`) |
+| `-barge-config` | — | Alias for `-stack-config` (SRE: load barge with yaml) |
+| `-stack-products` | default apps | Comma list for `-mode stack` when no YAML |
+| `-stack-namespace` | `0trust-stack` | Product stack namespace |
 | `-register-lb` | — | Server self-registration LB `host:port` |
 | `-register-host` | — | Address advertised to LB (node IP on k3s) |
 | `-index-from-hostname` | `false` | Port base + step from hostname `…-N` |
@@ -487,6 +522,65 @@ Optional `auth_proxy: true` proxies `/auth/*`, `/samln/*`, and related IdP paths
 | `TUNNELTUG_VPI_UPSTREAM` | `-vpi-upstream` |
 | `TUNNELTUG_VPI_LISTEN` | `-vpi-listen` |
 | `TUNNELTUG_DNS` | `-dns` |
+| `TUNNELTUG_CONFIG` | `-config` (site YAML or Tugconf) |
+| `TUNNELTUG_POP` | `-pop` (multi-PoP site selection) |
+
+## Architectures & resilient designs
+
+See **[docs/ARCHITECTURES.md](docs/ARCHITECTURES.md)** for deployment shapes (dev tunnel → multi-PoP anycast + kernel mesh) and resilient combos (R1–R5).
+
+On **[hub.tunneltug.com](https://hub.tunneltug.com)** each catalog image has a **Configure** modal: pick an architecture, scale replicas, link other services (or multiple instances of the same), preview **YAML** and **Tugconf**, then **Scale & link** / copy / download. Catalog JSON: `GET /_tunneltug/hub/catalog`.
+
+## Site config & Tugconf (complex multi-PoP)
+
+One document can describe **global ingresses** (anycast/LB/barge per PoP), product stacks, and a **kernel peer mesh** for real-time data sync. Local embeds stay primary; kernel peers replicate.
+
+| Flag | Purpose |
+|------|---------|
+| `-config path` | Site YAML **or** Tugconf (`.tug` / `.set` / set-style file) |
+| `-pop id` | Which PoP this process is (`sfo`, `ams`, …) |
+| `-config-check` | Expand + print run plan (kernel peers, roles, paths); exit |
+| `-config-show-set` | Dump config as Junos-like `set` lines; exit |
+
+**YAML** (`config/site.example.yaml`):
+
+```bash
+tunneltug -config config/site.example.yaml -pop sfo -config-check
+tunneltug -config config/site.example.yaml -pop sfo -mode stack -token "$TOKEN"
+```
+
+**Tugconf** — Junos-like hierarchical language, same IR (`config/site.example.tug`):
+
+```
+set site domain example.com
+set kernel_mesh mode full-mesh
+set pop sfo roles [anycast,lb,barge,stack,kernel]
+set pop sfo kernel ultimate_db node_id udb-sfo
+set pop sfo kernel ultimate_db url https://kernel-db.sfo.example.com:8480
+set pop ams kernel ultimate_db node_id udb-ams
+set pop ams kernel ultimate_db url https://kernel-db.ams.example.com:8480
+```
+
+```bash
+tunneltug -config config/site.example.tug -pop sfo -config-check
+```
+
+| Tugconf command | Effect |
+|-----------------|--------|
+| `set <path> <value>` | Set a leaf (paths space-separated) |
+| `delete <path>` | Remove a node |
+| `load override\|merge\|set <file>` | Pull in YAML or another `.tug` |
+| `# comment` | Ignored |
+
+`kernel_mesh.mode`:
+
+| Mode | Peer expansion |
+|------|----------------|
+| `full-mesh` | Every PoP peers with every other PoP that has `kernel.*.url` |
+| `hub-spoke` | Spokes peer only with `hub_pop`; hub peers with all spokes |
+| `manual` | No auto peers — use per-node `peers:` only |
+
+Precedence: **CLI flags > env > site file**. Secrets via `site.token_env` (default `TUNNELTUG_TOKEN`), not inline YAML.
 
 ## Hub + k3s fleets (what “barge” means)
 
@@ -531,7 +625,65 @@ export TUNNELTUG_TOKEN=… HUB_TAG=dev TUNNELTUG_ROOT=~/tunneltug
 ./bin/tunneltug -mode stack \
   -stack-products williwaw,motionkb,ack,social \
   -stack-tag dev -token "$TUNNELTUG_TOKEN"
+
+# Each barge configurable via YAML (SRE: load the barge with the yaml config)
+./bin/tunneltug -mode stack \
+  -stack-config config/stack.example.yaml \
+  -token "$TUNNELTUG_TOKEN"
+# Alias: -barge-config (same file). Env: TUNNELTUG_STACK_CONFIG / TUNNELTUG_BARGE_CONFIG
+
+# Co-run stack YAML on the k3s fleet controller
+./bin/tunneltug -mode barge -barge-runtime k3s -k3s-stack \
+  -barge-config config/stack.example.yaml \
+  -token "$TUNNELTUG_TOKEN"
 ```
+
+Per-barge YAML fields: `name`, `replicas`, `port`, `env`, `image`/`tag`, **`domain` / `public_url`** (public face — never hardcoded), `config_file` → ConfigMap at `config_mount` (default `/config`), `file` (include a single-barge YAML), `node_id` / `peers` (kernel replication), `disabled`.
+
+Stack-level: `namespace`, `tag`, `hub_host`, **`domain`**, **`public_scheme`**.
+
+Every published product has an example under `config/barges/*.example.yaml`. See `config/stack.example.yaml`.
+
+**Public domains:** set stack `domain:` and/or per-barge `domain:` / `public_url:`. TunnelTug does **not** hardcode product hostnames into barge env — omit domain for in-cluster-only `PUBLIC_*` URLs (`http://{name}.{ns}.svc:{port}`). Sibling service links use each barge’s YAML/catalog port from the live stack (not fixed foreign ports).
+
+### Kernel data-replication barges (`ultimate_db` / `ultimate_keystore`)
+
+These are the **service data-replication plane** so you can **scale out global ingresses** while keeping data **synced in real time** — not a remote store you *prefer over* local embeds.
+
+| | |
+|--|--|
+| **Local embeds** | Stay primary for serving at each PoP (product `*.db` / local ultimate_db files) |
+| **Kernel barge** | Real-time replication peer mesh across PoPs: `NetworkTransport` / `/kernel/*`, keystore RPC |
+| **Global scale** | More anycast/LB/barge ingresses + more kernel peers — each edge stays hot and consistent |
+| **Not** | “If `ULTIMATE_DB_URL` is set, open remote instead of local” |
+
+| Barge | Role |
+|-------|------|
+| `ultimate_db` | Replication hub for ultimate_db kernel peers (`/kernel/query`, `/kernel/kv`) |
+| `ultimate_keystore` | Replication hub for keystore kernel RPC (`/kernel/keystore`) |
+
+```bash
+# Standalone dedicated instances (YAML-equivalent: node_id + peers)
+./bin/tunneltug -mode ultimate_db -udb-data ./data/ultimate_db \
+  -udb-node-id udb-a -udb-peers "udb-b=http://host-b:8480" -token "$TOKEN"
+./bin/tunneltug -mode ultimate_keystore -uks-data ./data/ultimate_keystore -token "$TOKEN"
+
+# Product stack (siblings get KERNEL_DB_REPLICATION_URL / ULTIMATE_DB_URL as *peers*)
+./bin/tunneltug -mode stack -stack-config config/stack.example.yaml -token "$TOKEN"
+```
+
+Stack YAML for kernel:
+
+```yaml
+barges:
+  - name: ultimate_db
+    node_id: ultimate-db
+    peers: "udb-b=http://ultimate-db-b.other.svc:8480"
+  - name: williwaw
+    domain: williwaw.example.com
+```
+
+Product side: keep the local DB open; **add** the kernel as a peer for replication, e.g. `transport.AddPeer("ultimate-db", os.Getenv("KERNEL_DB_REPLICATION_URL"))` — do not switch primary storage to the URL.
 
 See `deploy/hub/README.md`, `0TrustCloud/deploy/oci/`, `0TrustCloud/deploy/k3s/stack/`.
 
@@ -571,4 +723,12 @@ Public product docs: [https://tunneltug.com/docs](https://tunneltug.com/docs)
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+This project is licensed under the **MIT License**.
+
+- Full text: [LICENSE](LICENSE)
+- SPDX identifier: `MIT`
+- Copyright (c) 2026 TunnelTug Contributors
+
+You may use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, subject to including the copyright and permission notice
+in all copies or substantial portions.

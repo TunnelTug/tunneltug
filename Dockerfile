@@ -1,4 +1,6 @@
 # syntax=docker/dockerfile:1
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 TunnelTug Contributors
 
 FROM golang:1.25-alpine AS builder
 RUN apk add --no-cache git ca-certificates

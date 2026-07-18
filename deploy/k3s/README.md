@@ -1,5 +1,7 @@
 # k3s barge fleet
 
+**License:** MIT — see the repository [LICENSE](../../LICENSE).
+
 Run TunnelTug **server** replicas as a StatefulSet so:
 
 - Updating web / other host services does **not** hard-reset the fleet
@@ -63,6 +65,39 @@ Instead of raw YAML, the binary can reconcile the same shape:
 Stopping the controller leaves pods running (default). Pass `-k3s-cleanup` only if you want delete-on-exit.
 
 Dashboard (controller host): `http://127.0.0.1:4050/_tunneltug/barges`.
+
+## Product barges from YAML
+
+Each product barge (Williwaw, Auth, Anycast, …) is configurable via a stack YAML.
+Load it with `-stack-config` or `-barge-config` (SRE alias).
+
+```bash
+# Standalone product stack
+tunneltug -mode stack -barge-config config/stack.example.yaml -token "$TOKEN"
+
+# Fleet controller + product stack from the same YAML
+tunneltug -mode barge -barge-runtime k3s -k3s-stack \
+  -barge-config config/stack.example.yaml \
+  -token "$TOKEN"
+```
+
+Example (`config/stack.example.yaml`):
+
+```yaml
+namespace: 0trust-stack
+tag: latest
+barges:
+  - name: williwaw
+    replicas: 2
+    env:
+      WILLIWAW_LOG_LEVEL: info
+  - name: anycast
+    config_file: anycast.example.yaml   # → ConfigMap mounted at /config
+```
+
+Per barge: `replicas`, `env`, `image`/`tag`, `config_file` (+ `config_mount`/`config_key`),
+`file` (include a single-barge YAML under `config/barges/`), `disabled`.
+Env: `TUNNELTUG_STACK_CONFIG` or `TUNNELTUG_BARGE_CONFIG`.
 
 ## Rolling an image (no full fleet kill)
 

@@ -1,0 +1,9 @@
+# 0Trust Auth (IdP face) barge
+name: auth
+replicas: 1
+# port: 8460
+# domain: auth.example.com
+# public_url: https://auth.example.com
+# Or with stack domain set, apex faces use https://{stack.domain}
+env:
+  TRUST_PRODUCT: auth

@@ -1,0 +1,76 @@
+# Product stack YAML — each barge is configurable (no hardcoded product domains).
+#
+# Load with either flag (SRE wording accepted):
+#   tunneltug -mode stack -stack-config config/stack.example.yaml -token "$TOKEN"
+#   tunneltug -mode stack -barge-config config/stack.example.yaml -token "$TOKEN"
+#
+# Or co-run on the k3s fleet controller:
+#   tunneltug -mode barge -barge-runtime k3s -k3s-stack \
+#     -barge-config config/stack.example.yaml -token "$TOKEN"
+#
+# Env: TUNNELTUG_STACK_CONFIG or TUNNELTUG_BARGE_CONFIG
+#
+# Public domains: set stack `domain` and/or per-barge `domain` / `public_url`.
+# Nothing in TunnelTug hardcodes 0trust.* product hostnames for barges.
+
+namespace: 0trust-stack
+tag: latest
+hub_host: hub.tunneltug.com
+
+# Optional stack-wide public DNS base (products → https://{name}.{domain};
+# platform faces use the apex). Omit for in-cluster-only PUBLIC_* URLs.
+# domain: example.com
+# public_scheme: https
+
+# "barges" and "products" are aliases — pick one.
+#
+# Ports: omit `port` to use the hub "Zero Config Port" default for that product.
+# Override with YAML, e.g. port: 13081 (also rewrites *_LISTEN / TRUST_PORT).
+#
+# Kernel barges are the *service data-replication* plane: products keep local embeds
+# and AddPeer these URLs (ultimate_db NetworkTransport + keystore kernel RPC).
+# Not a prefer-remote store; not TunnelTug mesh/SDF.
+barges:
+  # --- kernel data replication (shared by sibling product pods) ---
+  - name: ultimate_db
+    file: barges/ultimate_db.example.yaml
+  - name: ultimate_keystore
+    file: barges/ultimate_keystore.example.yaml
+
+  - name: social
+    file: barges/social.example.yaml
+
+  - name: williwaw
+    file: barges/williwaw.example.yaml
+
+  - name: motionkb
+    file: barges/motionkb.example.yaml
+
+  - name: ack
+    file: barges/ack.example.yaml
+
+  - name: mail
+    file: barges/mail.example.yaml
+
+  - name: search
+    file: barges/search.example.yaml
+
+  - name: name
+    file: barges/name.example.yaml
+
+  - name: dbsc_relay
+    file: barges/dbsc_relay.example.yaml
+
+  - name: anycast
+    file: barges/anycast.example.yaml
+
+  - name: orchid_ingest
+    file: barges/orchid_ingest.example.yaml
+
+  # Platform faces (auth, iam, access, …) — same binary, distinct ports/repos.
+  # - name: auth
+  #   file: barges/auth.example.yaml
+
+  # Skip a barge without removing it:
+  # - name: logs
+  #   disabled: true

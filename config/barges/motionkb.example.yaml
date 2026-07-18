@@ -1,0 +1,8 @@
+# MotionKB barge
+name: motionkb
+replicas: 1
+# port: 8090
+# domain: docs.example.com
+# public_url: https://docs.example.com
+env:
+  MOTIONKB_LOG_LEVEL: info

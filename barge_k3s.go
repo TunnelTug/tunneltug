@@ -143,19 +143,9 @@ func runBargeK3s() {
 	}
 
 	// Optional: product apps (williwaw, motionkb, …) via same controller — still no kubectl.
+	// Load from -stack-config / -barge-config YAML when set (SRE: each barge is configurable).
 	if *k3sStack {
-		tag := strings.TrimSpace(*stackTag)
-		if tag == "" {
-			tag = strings.TrimSpace(*hubTag)
-		}
-		if tag == "" {
-			tag = "dev"
-		}
-		stackNS := strings.TrimSpace(*stackNamespace)
-		if stackNS == "" {
-			stackNS = "0trust-stack"
-		}
-		apps, err := parseStackProducts(*stackProducts)
+		apps, stackNS, tag, err := resolveStackApps()
 		if err != nil {
 			log.Printf("k3s-stack products: %v", err)
 		} else {
@@ -168,7 +158,7 @@ func runBargeK3s() {
 			if err := reconcileProductStack(ctx, client, stackNS, tag, apps, st); err != nil {
 				log.Printf("k3s-stack reconcile: %v", err)
 			} else {
-				log.Printf("k3s-stack online namespace=%s apps=%d (self-contained)", stackNS, len(apps))
+				log.Printf("k3s-stack online namespace=%s apps=%d (self-contained, yaml-configurable)", stackNS, len(apps))
 				if !*quiet {
 					go runStackDashboard(ctx, st)
 				}

@@ -1,0 +1,6 @@
+name: iam
+replicas: 1
+# port: 8461
+# domain: iam.example.com
+env:
+  TRUST_PRODUCT: iam

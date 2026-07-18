@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -29,7 +31,22 @@ type stackApp struct {
 	Port        int32
 	Component   string
 	Env         map[string]string
-	ExtraEnvFn  func(ns string) map[string]string // service DNS helpers
+	// YAML overrides (from -stack-config / barge YAML).
+	Replicas        int32
+	ImageOverride   string // full image ref
+	TagOverride     string
+	HubHostOverride string
+	ConfigFile      string // host path → ConfigMap
+	ConfigMount     string // pod path, default /config
+	ConfigKey       string // filename in mount
+	// Public face (from YAML only — never hardcoded product domains).
+	Domain       string // barge hostname
+	PublicURL    string // full public base URL
+	StackDomain  string // stack-level domain base
+	PublicScheme string // http|https
+	// Kernel data-replication (ultimate_db / ultimate_keystore).
+	NodeID string
+	Peers  string // id=url,id2=url
 }
 
 func stackCatalog() map[string]stackApp {
@@ -41,13 +58,6 @@ func stackCatalog() map[string]stackApp {
 				"WILLIWAW_DB":     "/data/williwaw.db",
 				"WILLIWAW_WAL":    "/data/williwaw.wal",
 			},
-			ExtraEnvFn: func(ns string) map[string]string {
-				return map[string]string{
-					"WILLIWAW_PUBLIC_URL":     fmt.Sprintf("http://williwaw.%s.svc:%d", ns, 3081),
-					"WILLIWAW_SOCIAL_CDN_URL": fmt.Sprintf("http://social.%s.svc:%d", ns, 3085),
-					"WILLIWAW_ACK_CHAT_URL":   fmt.Sprintf("http://ack.%s.svc:%d", ns, 3083),
-				}
-			},
 		},
 		"motionkb": {
 			Name: "motionkb", Display: "MotionKB", Repo: "0trust/motionkb", Port: 8090, Component: "docs-cms",
@@ -55,15 +65,6 @@ func stackCatalog() map[string]stackApp {
 				"MOTIONKB_LISTEN": ":8090",
 				"MOTIONKB_DB":     "/data/motionkb.db",
 				"MOTIONKB_WAL":    "/data/motionkb.wal",
-			},
-			ExtraEnvFn: func(ns string) map[string]string {
-				return map[string]string{
-					"MOTIONKB_PUBLIC_URL":     fmt.Sprintf("http://motionkb.%s.svc:%d", ns, 8090),
-					"MOTIONKB_CMS_URL":        fmt.Sprintf("http://motionkb.%s.svc:%d", ns, 8090),
-					"MOTIONKB_SOCIAL_CDN_URL": fmt.Sprintf("http://social.%s.svc:%d", ns, 3085),
-					"MOTIONKB_WILLIWAW_URL":   fmt.Sprintf("http://williwaw.%s.svc:%d", ns, 3081),
-					"MOTIONKB_DEFCON_URL":     fmt.Sprintf("http://ack.%s.svc:%d", ns, 3083),
-				}
 			},
 		},
 		"ack": {
@@ -73,12 +74,6 @@ func stackCatalog() map[string]stackApp {
 				"ACK_DB":     "/data/ack.db",
 				"ACK_WAL":    "/data/ack.wal",
 			},
-			ExtraEnvFn: func(ns string) map[string]string {
-				return map[string]string{
-					"ACK_PUBLIC_URL":     fmt.Sprintf("http://ack.%s.svc:%d", ns, 3083),
-					"ACK_SOCIAL_CDN_URL": fmt.Sprintf("http://social.%s.svc:%d", ns, 3085),
-				}
-			},
 		},
 		"mail": {
 			Name: "mail", Display: "MeshMail", Repo: "0trust/mail", Port: 3086, Component: "mesh-mail",
@@ -86,11 +81,6 @@ func stackCatalog() map[string]stackApp {
 				"MAIL_LISTEN": ":3086",
 				"MAIL_DB":     "/data/mail.db",
 				"MAIL_WAL":    "/data/mail.wal",
-			},
-			ExtraEnvFn: func(ns string) map[string]string {
-				return map[string]string{
-					"MAIL_PUBLIC_URL": fmt.Sprintf("http://mail.%s.svc:%d", ns, 3086),
-				}
 			},
 		},
 		"search": {
@@ -100,11 +90,6 @@ func stackCatalog() map[string]stackApp {
 				"SEARCH_DB":     "/data/search.db",
 				"SEARCH_WAL":    "/data/search.wal",
 			},
-			ExtraEnvFn: func(ns string) map[string]string {
-				return map[string]string{
-					"SEARCH_PUBLIC_URL": fmt.Sprintf("http://search.%s.svc:%d", ns, 3087),
-				}
-			},
 		},
 		"social": {
 			Name: "social", Display: "0Trust CDN", Repo: "0trust/social", Port: 3085, Component: "cdn",
@@ -113,11 +98,6 @@ func stackCatalog() map[string]stackApp {
 				"SOCIAL_DB":       "/data/social.db",
 				"SOCIAL_WAL":      "/data/social.wal",
 				"SOCIAL_BLOB_DIR": "/data/blobs",
-			},
-			ExtraEnvFn: func(ns string) map[string]string {
-				return map[string]string{
-					"SOCIAL_PUBLIC_URL": fmt.Sprintf("http://social.%s.svc:%d", ns, 3085),
-				}
 			},
 		},
 		"platform": {
@@ -131,7 +111,99 @@ func stackCatalog() map[string]stackApp {
 			Name: "services", Display: "0Trust Services", Repo: "0trust/services", Port: 8080, Component: "mesh-services",
 			Env: map[string]string{},
 		},
+		"name": {
+			Name: "name", Display: "0Trust Name (gTLD)", Repo: "0trust/name", Port: 8447, Component: "gtld-face",
+			Env: map[string]string{
+				"TRUST_PORT":     "8447",
+				"TRUST_DATA_DIR": "/data",
+				"TRUST_PRODUCT":  "0trust.name",
+			},
+		},
+		"dbsc_relay": {
+			Name: "dbsc-relay", Display: "DBSC Relay", Repo: "0trust/dbsc-relay", Port: 8450, Component: "dbsc-relay",
+			Env: map[string]string{
+				"DBSC_RELAY_LISTEN": ":8450",
+			},
+		},
+		"anycast": {
+			Name: "anycast", Display: "Anycast edge", Repo: "0trust/anycast", Port: 9099, Component: "anycast-edge",
+			Env: map[string]string{},
+		},
+		// Platform feature faces — each is its own stack/hub barge (same platform binary).
+		"orchid_ingest": platformFace("orchid-ingest", "Orchid Sync Ingest", "0trust/orchid-ingest", 8451, "orchid-ingest", "orchid_ingest"),
+		"auth":          platformFace("auth", "0Trust Auth", "0trust/auth", 8460, "idp-auth", "auth"),
+		"iam":           platformFace("iam", "0Trust IAM", "0trust/iam", 8461, "iam", "iam"),
+		"access":        platformFace("access", "0Trust Access", "0trust/access", 8462, "ztna-access", "access"),
+		"scim":          platformFace("scim", "0Trust SCIM", "0trust/scim", 8463, "scim", "scim"),
+		"pki":           platformFace("pki", "0Trust PKI", "0trust/pki", 8464, "pki", "pki"),
+		"workflows":     platformFace("workflows", "0Trust Workflows", "0trust/workflows", 8465, "workflows", "workflows"),
+		"topology":      platformFace("topology", "0Trust Topology", "0trust/topology", 8466, "topology", "topology"),
+		"nameservice":   platformFace("nameservice", "0Trust Name Service", "0trust/nameservice", 8467, "nameservice", "nameservice"),
+		"servicekeys":   platformFace("servicekeys", "0Trust Service Keys", "0trust/servicekeys", 8468, "service-keys", "servicekeys"),
+		"vpi":           platformFace("vpi", "0Trust VPI", "0trust/vpi", 8469, "vpi", "vpi"),
+		"logs":          platformFace("logs", "0Trust Logs", "0trust/logs", 8470, "elastic-logs", "logs"),
+		// Kernel data-replication barges — peer endpoints so products *replicate*
+		// service data (local embeds stay primary; kernel is not a prefer-remote store).
+		"ultimate_db": {
+			Name: "ultimate-db", Display: "Ultimate DB (kernel replication)", Repo: "0trust/ultimate-db", Port: 8480, Component: "kernel-replication-db",
+			Env: map[string]string{
+				"UDB_DATA": "/data",
+			},
+		},
+		"ultimate_keystore": {
+			Name: "ultimate-keystore", Display: "Ultimate Keystore (kernel replication)", Repo: "0trust/ultimate-keystore", Port: 8481, Component: "kernel-replication-keystore",
+			Env: map[string]string{
+				"UKS_DATA": "/data",
+			},
+		},
 	}
+}
+
+// platformFace builds a stack app for a platform binary feature barge.
+func platformFace(deployName, display, repo string, port int32, component, product string) stackApp {
+	return stackApp{
+		Name: deployName, Display: display, Repo: repo, Port: port, Component: component,
+		Env: map[string]string{
+			"TRUST_PORT":     fmt.Sprintf("%d", port),
+			"TRUST_DATA_DIR": "/data",
+			"TRUST_PRODUCT":  product,
+		},
+	}
+}
+
+// productLinkEnv builds PUBLIC_* and inter-service URLs.
+// Public faces come from YAML domain/public_url (or stack domain); sibling links use
+// each barge's resolved port from the stack (never hardcoded foreign ports/domains).
+func productLinkEnv(app stackApp, all []stackApp, ns string) map[string]string {
+	pub := resolveBargePublicURL(app, ns)
+	out := map[string]string{}
+	switch app.Name {
+	case "williwaw":
+		out["WILLIWAW_PUBLIC_URL"] = pub
+		out["WILLIWAW_SOCIAL_CDN_URL"] = stackClusterServiceURL("social", all, ns, 3085)
+		out["WILLIWAW_ACK_CHAT_URL"] = stackClusterServiceURL("ack", all, ns, 3083)
+	case "motionkb":
+		out["MOTIONKB_PUBLIC_URL"] = pub
+		out["MOTIONKB_CMS_URL"] = pub
+		out["MOTIONKB_SOCIAL_CDN_URL"] = stackClusterServiceURL("social", all, ns, 3085)
+		out["MOTIONKB_WILLIWAW_URL"] = stackClusterServiceURL("williwaw", all, ns, 3081)
+		out["MOTIONKB_DEFCON_URL"] = stackClusterServiceURL("ack", all, ns, 3083)
+	case "ack":
+		out["ACK_PUBLIC_URL"] = pub
+		out["ACK_SOCIAL_CDN_URL"] = stackClusterServiceURL("social", all, ns, 3085)
+	case "mail":
+		out["MAIL_PUBLIC_URL"] = pub
+	case "search":
+		out["SEARCH_PUBLIC_URL"] = pub
+	case "social":
+		out["SOCIAL_PUBLIC_URL"] = pub
+	case "dbsc-relay":
+		out["DBSC_RELAY_PUBLIC"] = pub
+	case "platform", "services", "name", "auth", "iam", "access", "scim", "pki",
+		"workflows", "topology", "nameservice", "servicekeys", "vpi", "logs", "orchid-ingest":
+		out["TRUST_PUBLIC_URL"] = pub
+	}
+	return out
 }
 
 func parseStackProducts(raw string) ([]stackApp, error) {
@@ -139,8 +211,8 @@ func parseStackProducts(raw string) ([]stackApp, error) {
 	cat := stackCatalog()
 	var names []string
 	if raw == "" || strings.EqualFold(raw, "all") {
-		// Default stack for local product barges (exclude platform/services unless asked — heavier).
-		names = []string{"social", "ack", "williwaw", "motionkb", "mail", "search"}
+		// Default product stack (engine stays on barge fleets).
+		names = []string{"social", "ack", "williwaw", "motionkb", "mail", "search", "name", "dbsc_relay", "anycast", "orchid_ingest"}
 	} else {
 		for _, p := range strings.Split(raw, ",") {
 			p = strings.ToLower(strings.TrimSpace(p))
@@ -155,6 +227,29 @@ func parseStackProducts(raw string) ([]stackApp, error) {
 				// Engine is for barge fleet STS, not product stack.
 				continue
 			}
+			// Normalize catalog names → stack map keys.
+			switch p {
+			case "dbsc-relay":
+				p = "dbsc_relay"
+			case "orchid-ingest", "orchid-sync", "orchid-sync-ingest", "orchid_sync", "orchid_sync_ingest", "orchid":
+				p = "orchid_ingest"
+			case "idp", "identity":
+				p = "auth"
+			case "ztna":
+				p = "access"
+			case "service-keys", "service_keys", "keys":
+				p = "servicekeys"
+			case "name-service", "name_service":
+				p = "nameservice"
+			case "elastic", "observability":
+				p = "logs"
+			case "workflow":
+				p = "workflows"
+			case "ultimate-db", "udb", "kernel-db":
+				p = "ultimate_db"
+			case "ultimate-keystore", "uks", "keystore", "kernel-keystore":
+				p = "ultimate_keystore"
+			}
 			names = append(names, p)
 		}
 	}
@@ -163,12 +258,25 @@ func parseStackProducts(raw string) ([]stackApp, error) {
 	for _, n := range names {
 		app, ok := cat[n]
 		if !ok {
+			// try hub resolve → catalog key
+			if prod, err := resolveHubProduct(n); err == nil {
+				// map prod.Name to stack key when they differ
+				key := prod.Name
+				if key == "dbsc_relay" || key == "orchid_ingest" {
+					// already stack keys
+				}
+				app, ok = cat[key]
+			}
+		}
+		if !ok {
 			return nil, fmt.Errorf("unknown stack product %q", n)
 		}
 		if seen[app.Name] {
 			continue
 		}
 		seen[app.Name] = true
+		// Catalog ports are zero-config defaults (hub: "Zero Config Port: N").
+		syncStackListenEnv(&app)
 		out = append(out, app)
 	}
 	if len(out) == 0 {
@@ -178,11 +286,20 @@ func parseStackProducts(raw string) ([]stackApp, error) {
 }
 
 func stackImage(app stackApp, tag string) string {
-	host := strings.TrimSpace(*hubHost)
+	if img := strings.TrimSpace(app.ImageOverride); img != "" {
+		return img
+	}
+	host := strings.TrimSpace(app.HubHostOverride)
+	if host == "" {
+		host = strings.TrimSpace(*hubHost)
+	}
 	if host == "" {
 		host = "hub.tunneltug.com"
 	}
 	host = strings.TrimPrefix(strings.TrimPrefix(host, "https://"), "http://")
+	if t := strings.TrimSpace(app.TagOverride); t != "" {
+		tag = t
+	}
 	if tag == "" {
 		tag = strings.TrimSpace(*hubTag)
 	}
@@ -201,6 +318,46 @@ type stackStatus struct {
 	err      string
 }
 
+// resolveStackApps loads product barges from -stack-config/-barge-config YAML
+// or falls back to -stack-products. Shared by -mode stack and -k3s-stack.
+func resolveStackApps() (apps []stackApp, ns, tag string, err error) {
+	ns = strings.TrimSpace(*stackNamespace)
+	tag = strings.TrimSpace(*stackTag)
+
+	if cfgPath := stackConfigPath(); cfgPath != "" {
+		resolved, loadErr := loadStackConfig(cfgPath)
+		if loadErr != nil {
+			return nil, "", "", fmt.Errorf("stack-config: %w", loadErr)
+		}
+		apps = resolved.Apps
+		if ns == "" {
+			ns = resolved.Namespace
+		}
+		if tag == "" {
+			tag = resolved.Tag
+		}
+		if h := strings.TrimSpace(resolved.HubHost); h != "" {
+			*hubHost = h
+		}
+		log.Printf("stack loaded config %s barges=%d namespace=%s tag=%s", cfgPath, len(apps), ns, tag)
+	} else {
+		apps, err = parseStackProducts(*stackProducts)
+		if err != nil {
+			return nil, "", "", err
+		}
+	}
+	if ns == "" {
+		ns = "0trust-stack"
+	}
+	if tag == "" {
+		tag = strings.TrimSpace(*hubTag)
+	}
+	if tag == "" {
+		tag = "dev"
+	}
+	return apps, ns, tag, nil
+}
+
 func runStack() {
 	ctx, stop := notifyShutdownContext()
 	defer stop()
@@ -209,19 +366,8 @@ func runStack() {
 		log.Fatalf("Configuration error: %v", err)
 	}
 	token := strings.TrimSpace(*authToken)
-	ns := strings.TrimSpace(*stackNamespace)
-	if ns == "" {
-		ns = "0trust-stack"
-	}
-	tag := strings.TrimSpace(*stackTag)
-	if tag == "" {
-		tag = strings.TrimSpace(*hubTag)
-	}
-	if tag == "" {
-		tag = "dev"
-	}
 
-	apps, err := parseStackProducts(*stackProducts)
+	apps, ns, tag, err := resolveStackApps()
 	if err != nil {
 		log.Fatalf("stack: %v", err)
 	}
@@ -234,10 +380,11 @@ func runStack() {
 	}
 
 	// Pull each product image into local k3s via k3s ctr (no kubectl).
+	// Images without a registry manifest cannot run — fail that barge hard.
 	for _, app := range apps {
 		img := stackImage(app, tag)
 		if err := ensureK3sBargeImage(ctx, img); err != nil {
-			log.Printf("stack pull %s: %v (continuing)", img, err)
+			log.Fatalf("stack pull %s: %v (registry manifest required to run)", img, err)
 		}
 	}
 
@@ -264,6 +411,9 @@ func runStack() {
 		for _, app := range apps {
 			_ = client.AppsV1().Deployments(ns).Delete(delCtx, app.Name, metav1.DeleteOptions{})
 			_ = client.CoreV1().Services(ns).Delete(delCtx, app.Name, metav1.DeleteOptions{})
+			if strings.TrimSpace(app.ConfigFile) != "" {
+				_ = client.CoreV1().ConfigMaps(ns).Delete(delCtx, stackConfigMapName(app), metav1.DeleteOptions{})
+			}
 		}
 		log.Printf("stack cleanup: deleted %d apps in %s", len(apps), ns)
 	} else {
@@ -280,10 +430,10 @@ func reconcileProductStack(ctx context.Context, client kubernetes.Interface, ns,
 		if err := ensureStackService(ctx, client, ns, app); err != nil {
 			return fmt.Errorf("service %s: %w", app.Name, err)
 		}
-		if err := ensureStackDeployment(ctx, client, ns, app, img); err != nil {
+		if err := ensureStackDeployment(ctx, client, ns, apps, app, img); err != nil {
 			return fmt.Errorf("deployment %s: %w", app.Name, err)
 		}
-		log.Printf("stack reconciled %s image=%s port=%d", app.Name, img, app.Port)
+		log.Printf("stack reconciled %s image=%s zero_config_or_yaml_port=%d", app.Name, img, app.Port)
 	}
 	_ = refreshStackStatus(ctx, client, ns, apps, tag, status)
 	return nil
@@ -331,17 +481,199 @@ func ensureStackService(ctx context.Context, client kubernetes.Interface, ns str
 	return err
 }
 
-func ensureStackDeployment(ctx context.Context, client kubernetes.Interface, ns string, app stackApp, image string) error {
+func stackConfigMapName(app stackApp) string {
+	return app.Name + "-config"
+}
+
+// ensureStackConfigMap loads app.ConfigFile from the controller host into a ConfigMap.
+func ensureStackConfigMap(ctx context.Context, client kubernetes.Interface, ns string, app stackApp) error {
+	if strings.TrimSpace(app.ConfigFile) == "" {
+		return nil
+	}
+	raw, err := os.ReadFile(app.ConfigFile)
+	if err != nil {
+		return fmt.Errorf("read config_file %s: %w", app.ConfigFile, err)
+	}
+	key := strings.TrimSpace(app.ConfigKey)
+	if key == "" {
+		key = filepath.Base(app.ConfigFile)
+		if key == "." || key == "/" || key == "" {
+			key = "config.yaml"
+		}
+	}
+	name := stackConfigMapName(app)
+	labels := stackLabels(app)
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: ns,
+			Labels:    labels,
+			Annotations: map[string]string{
+				"tunneltug.io/managed":     "stack",
+				"tunneltug.io/config-file": app.ConfigFile,
+			},
+		},
+		Data: map[string]string{key: string(raw)},
+	}
+	existing, err := client.CoreV1().ConfigMaps(ns).Get(ctx, name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		_, err = client.CoreV1().ConfigMaps(ns).Create(ctx, cm, metav1.CreateOptions{})
+		return err
+	}
+	if err != nil {
+		return err
+	}
+	existing.Data = cm.Data
+	existing.Labels = cm.Labels
+	existing.Annotations = cm.Annotations
+	_, err = client.CoreV1().ConfigMaps(ns).Update(ctx, existing, metav1.UpdateOptions{})
+	return err
+}
+
+func ensureStackDeployment(ctx context.Context, client kubernetes.Interface, ns string, all []stackApp, app stackApp, image string) error {
+	if err := ensureStackConfigMap(ctx, client, ns, app); err != nil {
+		return err
+	}
 	labels := stackLabels(app)
 	replicas := int32(1)
-	env := []corev1.EnvVar{}
+	if app.Replicas > 0 {
+		replicas = app.Replicas
+	}
+	// Build env: generated links + kernel replication URLs first, then catalog/YAML env
+	// so SRE env: overrides always win (including public URLs).
+	merged := map[string]string{}
+	for k, v := range productLinkEnv(app, all, ns) {
+		merged[k] = v
+	}
+	// Kernel replication peers: inject ultimate_db / keystore service DNS so product
+	// barges can AddPeer for data replication (local embeds remain; no prefer-remote).
+	if app.Name != "ultimate-db" && app.Name != "ultimate-keystore" {
+		for k, v := range stackKernelEnv(ns, all...) {
+			merged[k] = v
+		}
+	}
 	for k, v := range app.Env {
+		merged[k] = v
+	}
+	// Advertise mounted config path for apps that look for TUNNELTUG_CONFIG / TRUST_CONFIG.
+	if cf := strings.TrimSpace(app.ConfigFile); cf != "" {
+		mount := strings.TrimSpace(app.ConfigMount)
+		if mount == "" {
+			mount = "/config"
+		}
+		key := strings.TrimSpace(app.ConfigKey)
+		if key == "" {
+			key = filepath.Base(cf)
+		}
+		cfgPath := strings.TrimRight(mount, "/") + "/" + key
+		if _, ok := merged["TUNNELTUG_CONFIG"]; !ok {
+			merged["TUNNELTUG_CONFIG"] = cfgPath
+		}
+		if _, ok := merged["TRUST_CONFIG"]; !ok {
+			merged["TRUST_CONFIG"] = cfgPath
+		}
+	}
+	env := make([]corev1.EnvVar, 0, len(merged))
+	for k, v := range merged {
 		env = append(env, corev1.EnvVar{Name: k, Value: v})
 	}
-	if app.ExtraEnvFn != nil {
-		for k, v := range app.ExtraEnvFn(ns) {
-			env = append(env, corev1.EnvVar{Name: k, Value: v})
+	c := corev1.Container{
+		Name:            app.Name,
+		Image:           image,
+		ImagePullPolicy: corev1.PullAlways,
+		Ports: []corev1.ContainerPort{{
+			Name: "http", ContainerPort: app.Port, Protocol: corev1.ProtocolTCP,
+		}},
+		Env: env,
+		VolumeMounts: []corev1.VolumeMount{{
+			Name: "data", MountPath: "/data",
+		}},
+		ReadinessProbe: &corev1.Probe{
+			ProbeHandler: corev1.ProbeHandler{
+				TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt32(app.Port)},
+			},
+			InitialDelaySeconds: 3,
+			PeriodSeconds:       5,
+		},
+	}
+	// Anycast image is the TunnelTug binary; run the anycast edge mode.
+	if app.Name == "anycast" {
+		anycastCfg := "/config/anycast.yaml"
+		if key := strings.TrimSpace(app.ConfigKey); key != "" {
+			mount := strings.TrimSpace(app.ConfigMount)
+			if mount == "" {
+				mount = "/config"
+			}
+			anycastCfg = strings.TrimRight(mount, "/") + "/" + key
 		}
+		c.Args = []string{"-mode", "anycast", "-anycast-config", anycastCfg}
+	}
+	// Kernel data-replication barges — TunnelTug binary; peers/node_id from YAML.
+	if app.Name == "ultimate-db" {
+		nodeID := strings.TrimSpace(app.NodeID)
+		if nodeID == "" {
+			nodeID = "ultimate-db"
+		}
+		c.Args = []string{
+			"-mode", "ultimate_db",
+			"-udb-listen", fmt.Sprintf(":%d", app.Port),
+			"-udb-data", "/data",
+			"-udb-node-id", nodeID,
+		}
+		if peers := strings.TrimSpace(app.Peers); peers != "" {
+			c.Args = append(c.Args, "-udb-peers", peers)
+		}
+	}
+	if app.Name == "ultimate-keystore" {
+		nodeID := strings.TrimSpace(app.NodeID)
+		if nodeID == "" {
+			nodeID = "ultimate-keystore"
+		}
+		c.Args = []string{
+			"-mode", "ultimate_keystore",
+			"-uks-listen", fmt.Sprintf(":%d", app.Port),
+			"-uks-data", "/data",
+			"-uks-node-id", nodeID,
+		}
+	}
+	// Platform-binary faces: TRUST_PORT already set via app.Env (name:8447, orchid-ingest:8451).
+	vols := []corev1.Volume{{
+		Name: "data",
+		VolumeSource: corev1.VolumeSource{
+			EmptyDir: &corev1.EmptyDirVolumeSource{},
+		},
+	}}
+
+	// Mount per-barge YAML config when configured (SRE: load barge with yaml config).
+	hasYAMLConfig := strings.TrimSpace(app.ConfigFile) != ""
+	if hasYAMLConfig {
+		mount := strings.TrimSpace(app.ConfigMount)
+		if mount == "" {
+			mount = "/config"
+		}
+		c.VolumeMounts = append(c.VolumeMounts, corev1.VolumeMount{
+			Name: "barge-config", MountPath: mount, ReadOnly: true,
+		})
+		vols = append(vols, corev1.Volume{
+			Name: "barge-config",
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{Name: stackConfigMapName(app)},
+				},
+			},
+		})
+	} else if app.Name == "anycast" {
+		// Legacy optional ConfigMap when no stack YAML config_file is set.
+		c.VolumeMounts = append(c.VolumeMounts, corev1.VolumeMount{Name: "anycast-config", MountPath: "/config"})
+		vols = append(vols, corev1.Volume{
+			Name: "anycast-config",
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "anycast-config"},
+					Optional:             boolPtr(true),
+				},
+			},
+		})
 	}
 	dep := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
@@ -361,31 +693,8 @@ func ensureStackDeployment(ctx context.Context, client kubernetes.Interface, ns 
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: labels},
 				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{{
-						Name:            app.Name,
-						Image:           image,
-						ImagePullPolicy: corev1.PullAlways,
-						Ports: []corev1.ContainerPort{{
-							Name: "http", ContainerPort: app.Port, Protocol: corev1.ProtocolTCP,
-						}},
-						Env: env,
-						VolumeMounts: []corev1.VolumeMount{{
-							Name: "data", MountPath: "/data",
-						}},
-						ReadinessProbe: &corev1.Probe{
-							ProbeHandler: corev1.ProbeHandler{
-								TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt32(app.Port)},
-							},
-							InitialDelaySeconds: 3,
-							PeriodSeconds:       5,
-						},
-					}},
-					Volumes: []corev1.Volume{{
-						Name: "data",
-						VolumeSource: corev1.VolumeSource{
-							EmptyDir: &corev1.EmptyDirVolumeSource{},
-						},
-					}},
+					Containers: []corev1.Container{c},
+					Volumes:    vols,
 				},
 			},
 		},
@@ -405,6 +714,8 @@ func ensureStackDeployment(ctx context.Context, client kubernetes.Interface, ns 
 	return err
 }
 
+func boolPtr(b bool) *bool { return &b }
+
 func watchProductStack(ctx context.Context, client kubernetes.Interface, ns string, apps []stackApp, status *stackStatus) {
 	tag := status.tag
 	ticker := time.NewTicker(5 * time.Second)
@@ -422,13 +733,17 @@ func watchProductStack(ctx context.Context, client kubernetes.Interface, ns stri
 func refreshStackStatus(ctx context.Context, client kubernetes.Interface, ns string, apps []stackApp, tag string, status *stackStatus) error {
 	rows := make([]map[string]any, 0, len(apps))
 	for _, app := range apps {
+		desired := int32(1)
+		if app.Replicas > 0 {
+			desired = app.Replicas
+		}
 		row := map[string]any{
 			"name":    app.Name,
 			"display": app.Display,
 			"image":   stackImage(app, tag),
 			"port":    app.Port,
 			"ready":   0,
-			"desired": 1,
+			"desired": desired,
 			"phase":   "Unknown",
 		}
 		dep, err := client.AppsV1().Deployments(ns).Get(ctx, app.Name, metav1.GetOptions{})

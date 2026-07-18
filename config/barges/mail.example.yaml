@@ -1,0 +1,8 @@
+# MeshMail barge
+name: mail
+replicas: 1
+# port: 3086
+# domain: mail.example.com
+# public_url: https://mail.example.com
+env:
+  MAIL_LOG_LEVEL: info

@@ -1,0 +1,5 @@
+name: services
+replicas: 1
+# port: 8080
+# domain: services.example.com
+# public_url: https://services.example.com

@@ -1,0 +1,6 @@
+name: topology
+replicas: 1
+# port: 8466
+# domain: topology.example.com
+env:
+  TRUST_PRODUCT: topology

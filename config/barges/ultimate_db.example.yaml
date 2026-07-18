@@ -1,0 +1,25 @@
+# Ultimate DB — kernel *data-replication* barge for product services.
+#
+# Products keep local embeds for serving. This barge is a replication *peer*
+# (NetworkTransport AddPeer / /kernel/* scatter-gather) — not a prefer-remote store.
+# Sibling pods get KERNEL_DB_REPLICATION_URL / ULTIMATE_DB_URL to add as peers.
+#
+# Standalone:
+#   tunneltug -mode ultimate_db -udb-data ./data/ultimate_db \
+#     -udb-node-id udb-a -udb-peers "udb-b=http://host-b:8480" -token "$TOKEN"
+#
+# Stack:
+#   barges:
+#     - name: ultimate_db
+#       file: barges/ultimate_db.example.yaml
+
+name: ultimate_db
+replicas: 1
+# port: 8480
+
+# Kernel replication identity + peer list (YAML-driven, not hardcoded).
+node_id: ultimate-db
+# peers: "udb-b=http://ultimate-db-b.other-ns.svc:8480,udb-c=http://10.0.0.3:8480"
+
+env:
+  UDB_DATA: /data

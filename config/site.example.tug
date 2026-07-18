@@ -1,0 +1,64 @@
+# TunnelTug Tugconf — Junos-like hierarchical config (same IR as site.example.yaml).
+#
+#   tunneltug -config config/site.example.tug -pop sfo -config-check
+#   tunneltug -config config/site.example.tug -pop sfo -mode stack -token "$TOKEN"
+#
+# Commands: set | delete | load override|merge|set <file>
+# Comments start with #.
+
+set apiVersion tunneltug/v1
+set kind Site
+
+set site name global-prod
+set site domain example.com
+set site public_scheme https
+set site token_env TUNNELTUG_TOKEN
+
+set mesh enabled true
+set mesh tld tunnel
+set mesh zone tunneltug.tunnel
+set mesh ns ns.tunneltug.tunnel
+
+set hub host hub.tunneltug.com
+set hub tag latest
+
+set kernel_mesh mode full-mesh
+set kernel_mesh transport https
+
+set stack namespace 0trust-stack
+set stack barge ultimate_db name ultimate_db
+set stack barge ultimate_db file barges/ultimate_db.example.yaml
+set stack barge ultimate_keystore name ultimate_keystore
+set stack barge ultimate_keystore file barges/ultimate_keystore.example.yaml
+set stack barge social name social
+set stack barge social file barges/social.example.yaml
+set stack barge williwaw name williwaw
+set stack barge williwaw file barges/williwaw.example.yaml
+
+set pop sfo region us-west
+set pop sfo roles [anycast,lb,barge,stack,kernel]
+set pop sfo domain sfo.example.com
+set pop sfo tunnel public 443
+set pop sfo tunnel control 9000
+set pop sfo tunnel prod true
+set pop sfo tunnel barge replicas 3
+set pop sfo tunnel barge runtime k3s
+set pop sfo tunnel barge fleet_id sfo
+set pop sfo kernel ultimate_db node_id udb-sfo
+set pop sfo kernel ultimate_db url https://kernel-db.sfo.example.com:8480
+set pop sfo kernel ultimate_keystore node_id uks-sfo
+set pop sfo kernel ultimate_keystore url https://kernel-ks.sfo.example.com:8481
+
+set pop ams region eu-west
+set pop ams roles [anycast,lb,barge,stack,kernel]
+set pop ams domain ams.example.com
+set pop ams tunnel public 443
+set pop ams tunnel control 9000
+set pop ams tunnel prod true
+set pop ams tunnel barge replicas 3
+set pop ams tunnel barge runtime k3s
+set pop ams tunnel barge fleet_id ams
+set pop ams kernel ultimate_db node_id udb-ams
+set pop ams kernel ultimate_db url https://kernel-db.ams.example.com:8480
+set pop ams kernel ultimate_keystore node_id uks-ams
+set pop ams kernel ultimate_keystore url https://kernel-ks.ams.example.com:8481

@@ -1,0 +1,6 @@
+name: nameservice
+replicas: 1
+# port: 8467
+# domain: ns.example.com
+env:
+  TRUST_PRODUCT: nameservice

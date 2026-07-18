@@ -1,0 +1,6 @@
+name: workflows
+replicas: 1
+# port: 8465
+# domain: workflows.example.com
+env:
+  TRUST_PRODUCT: workflows

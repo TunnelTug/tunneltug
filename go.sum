@@ -22,8 +22,6 @@ github.com/0TrustCloud/secure_registrar v1.0.1 h1:2VTj9DPapDYjuLYSTXLHqaMWxc5rBV
 github.com/0TrustCloud/secure_registrar v1.0.1/go.mod h1:O38JLZyKtKXom/XkeUpIQhAreZ+oeqL7tpUTaV0wTHA=
 github.com/0TrustCloud/secure_ssh v0.1.2 h1:D+C8OHA0jcviyco6bdrvw5QtUblhBxSqGrC3lwapu74=
 github.com/0TrustCloud/secure_ssh v0.1.2/go.mod h1:bm7bKHbgI2d8pUr++9gMfXTFDgmrFEgk9PvTH+rRrU0=
-github.com/0TrustCloud/ultimate_db v1.3.6 h1:XIXGy4zxtsfSH0u3up+2p6hsuFDyiL3C5/ky0IzNJ/M=
-github.com/0TrustCloud/ultimate_db v1.3.6/go.mod h1:zts/iJNVBJeAeIurLSuN+RYLS1Rc5d1qWRV0g8YD420=
 github.com/boombuler/barcode v1.0.1-0.20190219062509-6c824513bacc h1:biVzkmvwrH8WK8raXaxBx6fRVTlJILwEwQGL1I/ByEI=
 github.com/boombuler/barcode v1.0.1-0.20190219062509-6c824513bacc/go.mod h1:paBWMcWSl3LHKBqUq+rly7CNSldXjb2rDl3JlRe0mD8=
 github.com/creack/pty v1.1.9/go.mod h1:oKZEueFk5CKHvIhNR5MUki03XCEU+Q6VDXinZuGJ33E=

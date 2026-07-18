@@ -1,3 +1,10 @@
+// TunnelTug — QUIC tunnels for localhost.
+//
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 TunnelTug Contributors
+//
+// See LICENSE in the repository root for the full MIT license text.
+
 package main
 
 import (
@@ -29,6 +36,12 @@ func main() {
 	}
 
 	applyEnvDefaults()
+	// Site YAML / Tugconf: expand multi-PoP plan and apply into flags (CLI wins).
+	if done, err := maybeApplySiteConfig(); err != nil {
+		log.Fatalf("Site config error: %v", err)
+	} else if done {
+		return
+	}
 	applyProductionDefaults()
 	if err := applyIndexFromHostname(); err != nil {
 		log.Fatalf("Configuration error: %v", err)
@@ -36,9 +49,9 @@ func main() {
 	if strings.ToLower(strings.TrimSpace(*mode)) == "barge" {
 		bargeScalingProfile()
 	}
-	// Hub / stack modes do not use QUIC control.
+	// Hub / stack / kernel storage modes do not use QUIC control.
 	switch strings.ToLower(strings.TrimSpace(*mode)) {
-	case "hub", "hub-publish", "stack":
+	case "hub", "hub-publish", "stack", "ultimate_db", "ultimate-db", "ultimate_keystore", "ultimate-keystore":
 		// skip QUIC
 	default:
 		ensureControlQUIC()
@@ -98,7 +111,13 @@ func main() {
 	case "stack":
 		log.Printf("Starting product stack %s [k3s self-contained, no kubectl]", Version)
 		runStack()
+	case "ultimate_db", "ultimate-db":
+		log.Printf("Starting dedicated ultimate_db kernel barge %s (not mesh/SDF)", Version)
+		runUltimateDBBarge()
+	case "ultimate_keystore", "ultimate-keystore":
+		log.Printf("Starting dedicated ultimate_keystore kernel barge %s", Version)
+		runUltimateKeystoreBarge()
 	default:
-		log.Fatalf("Unknown mode: %s. Use 'server', 'client', 'lb', 'barge', 'orchestrator', 'anycast', 'hub', 'hub-publish', or 'stack'.", *mode)
+		log.Fatalf("Unknown mode: %s. Use 'server', 'client', 'lb', 'barge', 'orchestrator', 'anycast', 'hub', 'hub-publish', 'stack', 'ultimate_db', or 'ultimate_keystore'.", *mode)
 	}
 }

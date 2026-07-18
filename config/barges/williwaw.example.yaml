@@ -1,0 +1,27 @@
+# Williwaw barge — all public hostnames come from YAML (never hardcoded).
+#
+# Stack include:
+#   barges:
+#     - name: williwaw
+#       file: barges/williwaw.example.yaml
+
+name: williwaw
+replicas: 2
+# port: 3081
+# tag: canary
+# image: hub.tunneltug.com/0trust/williwaw:1.2.3
+
+# Public face (pick one):
+# domain: williwaw.example.com
+# public_url: https://williwaw.example.com
+# Or rely on stack-level domain: → https://williwaw.{stack.domain}
+
+env:
+  WILLIWAW_LOG_LEVEL: info
+  # Override generated PUBLIC_* if needed:
+  # WILLIWAW_PUBLIC_URL: https://williwaw.example.com
+
+# Optional app config mounted into the pod:
+# config_file: williwaw-app.yaml
+# config_mount: /config
+# config_key: williwaw.yaml

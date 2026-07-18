@@ -29,6 +29,65 @@ func testHub(t *testing.T) *hubServer {
 	}
 }
 
+func TestHubIndexAndCatalog(t *testing.T) {
+	h := testHub(t)
+	srv := httptest.NewServer(h.handler())
+	t.Cleanup(srv.Close)
+
+	res, err := http.Get(srv.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != 200 {
+		t.Fatalf("status %d", res.StatusCode)
+	}
+	body, _ := io.ReadAll(res.Body)
+	s := string(body)
+	for _, want := range []string{"Config builder", "Architectures", "Scale &amp; link", "catalog-data", "Tugconf"} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("hub index missing %q", want)
+		}
+	}
+
+	res2, err := http.Get(srv.URL + "/_tunneltug/hub/catalog")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res2.Body.Close()
+	var cat map[string]any
+	if err := json.NewDecoder(res2.Body).Decode(&cat); err != nil {
+		t.Fatal(err)
+	}
+	prods, ok := cat["products"].([]any)
+	if !ok || len(prods) < 5 {
+		t.Fatalf("products: %v", cat["products"])
+	}
+	archs, ok := cat["architectures"].([]any)
+	if !ok || len(archs) < 5 {
+		t.Fatalf("architectures: %v", cat["architectures"])
+	}
+}
+
+func TestHubBuilderCatalogKinds(t *testing.T) {
+	list := hubBuilderCatalog()
+	if len(list) == 0 {
+		t.Fatal("empty")
+	}
+	var sawKernel, sawApp bool
+	for _, p := range list {
+		if p.Name == "ultimate_db" && p.Kind == "kernel" {
+			sawKernel = true
+		}
+		if p.Name == "williwaw" && p.Kind == "app" {
+			sawApp = true
+		}
+	}
+	if !sawKernel || !sawApp {
+		t.Fatalf("kinds: kernel=%v app=%v", sawKernel, sawApp)
+	}
+}
+
 func TestHubV2RootPublic(t *testing.T) {
 	h := testHub(t)
 	req := httptest.NewRequest(http.MethodGet, "/v2/", nil)

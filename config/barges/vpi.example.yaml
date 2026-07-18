@@ -1,0 +1,6 @@
+name: vpi
+replicas: 1
+# port: 8469
+# domain: vpi.example.com
+env:
+  TRUST_PRODUCT: vpi

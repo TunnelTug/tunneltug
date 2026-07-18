@@ -1,0 +1,6 @@
+# DBSC relay barge
+name: dbsc_relay
+replicas: 1
+# port: 8450
+# domain: dbsc.example.com
+# public_url: https://dbsc.example.com

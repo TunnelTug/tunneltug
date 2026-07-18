@@ -1,0 +1,7 @@
+name: platform
+replicas: 1
+# port: 8443
+# domain: platform.example.com
+# public_url: https://platform.example.com
+env:
+  TRUST_DATA_DIR: /data

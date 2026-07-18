@@ -1,0 +1,100 @@
+# TunnelTug site config — multi-PoP global ingress + real-time kernel replication.
+#
+#   tunneltug -config config/site.example.yaml -pop sfo -config-check
+#   tunneltug -config config/site.example.yaml -pop sfo -mode stack -token "$TOKEN"
+#   tunneltug -config config/site.example.yaml -config-show-set
+#
+# Equivalent Junos-like language: config/site.example.tug
+#
+# Model: each PoP serves from local embeds; kernel peers sync service data in real time.
+# Never prefer-remote over local — AddPeer the expanded peers only.
+
+apiVersion: tunneltug/v1
+kind: Site
+
+site:
+  name: global-prod
+  domain: example.com
+  public_scheme: https
+  token_env: TUNNELTUG_TOKEN
+
+mesh:
+  enabled: true
+  tld: tunnel
+  zone: tunneltug.tunnel
+  ns: ns.tunneltug.tunnel
+
+hub:
+  host: hub.tunneltug.com
+  tag: latest
+
+# Auto-wire ultimate_db / keystore peers across pops (replicate, not prefer-remote).
+kernel_mesh:
+  mode: full-mesh          # full-mesh | hub-spoke | manual
+  # hub_pop: sfo           # required when mode is hub-spoke
+  transport: https
+
+stack:
+  namespace: 0trust-stack
+  # domain inherits site/pop domain when unset
+  barges:
+    - name: ultimate_db
+      file: barges/ultimate_db.example.yaml
+    - name: ultimate_keystore
+      file: barges/ultimate_keystore.example.yaml
+    - name: social
+      file: barges/social.example.yaml
+    - name: williwaw
+      file: barges/williwaw.example.yaml
+
+pops:
+  - id: sfo
+    region: us-west
+    roles: [anycast, lb, barge, stack, kernel]
+    domain: sfo.example.com
+    tunnel:
+      public: "443"
+      control: "9000"
+      prod: true
+      # email: ops@example.com
+      barge:
+        replicas: 3
+        runtime: k3s
+        fleet_id: sfo
+    # anycast:
+    #   file: pops/sfo/anycast.yaml
+    kernel:
+      ultimate_db:
+        node_id: udb-sfo
+        # How other PoPs reach this kernel for real-time replication:
+        url: https://kernel-db.sfo.example.com:8480
+      ultimate_keystore:
+        node_id: uks-sfo
+        url: https://kernel-ks.sfo.example.com:8481
+
+  - id: ams
+    region: eu-west
+    roles: [anycast, lb, barge, stack, kernel]
+    domain: ams.example.com
+    tunnel:
+      public: "443"
+      control: "9000"
+      prod: true
+      barge:
+        replicas: 3
+        runtime: k3s
+        fleet_id: ams
+    # anycast:
+    #   file: pops/ams/anycast.yaml
+    kernel:
+      ultimate_db:
+        node_id: udb-ams
+        url: https://kernel-db.ams.example.com:8480
+      ultimate_keystore:
+        node_id: uks-ams
+        url: https://kernel-ks.ams.example.com:8481
+
+# Optional single-process default when not multi-pop:
+# process:
+#   mode: stack
+#   pop: sfo

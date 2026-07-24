@@ -32,6 +32,20 @@ If any answer is fuzzy, stop. Do not “try ACME from both sides.”
 
 ---
 
+## One owner per node port (systemd **or** hostPort)
+
+On any host that runs both **product systemd units** and TunnelTug **`-mode stack`**:
+
+| Exactly one | Never both |
+|-------------|------------|
+| Host `*.service` binds `:PORT` | Same `:PORT` as k3s Deployment **hostPort** |
+| Stack pod hostPort + DNAT | Host process also LISTEN on that port |
+
+Stack hostPort DNAT can steal traffic from a “healthy” systemd unit → public 404 / wrong UI.  
+**Full procedure:** [11-host-ownership.md](11-host-ownership.md) (defcon.chat post-mortem).
+
+---
+
 ## ACME is on-demand and expensive when empty
 
 | Situation | LE behavior |

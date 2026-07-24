@@ -34,7 +34,6 @@ Day-2 procedures for every mode (ACME ownership, fleets, hub/stack, mesh, anycas
 - **Operator playbooks** — Day-2 ACME, vhosts, fleets, hub/stack, mesh, anycast in [docs/playbooks/](docs/playbooks/README.md)
 - **VPI stub** — Local resolver for private TLDs (`.tunnel` / `.mesh` / `.social`)
 - **Anycast edge** — BGP health-gated split-horizon DNS face (`-mode anycast` or `-anycast` sidecar on server/lb)
-- **TodoTraq barge** — Hybrid delivery + CRM product (`work` / `todotraq`, port 3098, brand face `todotraq.com`)
 
 ## Architecture
 

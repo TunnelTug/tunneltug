@@ -116,3 +116,4 @@ This is **not** public marketing TLS for `0trustos.com` — that remains the **s
 1. Publish images with **hub-publish / k3s-hub**, not random external registries as the control path.
 2. Stack domains come from YAML `domain` / per-barge `public_url` — nothing hardcoded for 0trust.* in the engine.
 3. Do not dual-ACME product faces that are supposed to terminate on a TunnelTug public edge.
+4. **Never** give a product both host systemd and stack `hostPort` on the same node. Set `replicas: 0` for host-owned faces. See [11-host-ownership.md](11-host-ownership.md).

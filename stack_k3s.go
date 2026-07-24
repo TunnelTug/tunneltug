@@ -2,24 +2,36 @@ package main
 
 import (
 	"context"
+	_ "embed"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/0TrustCloud/guikit"
+	"gopkg.in/yaml.v3"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 )
+
+//go:embed ui/stack_dashboard.gml
+var stackDashboardGML string
 
 // Product stack is reconciled entirely inside TunnelTug (client-go).
 // No kubectl required — same k3s path as barge fleets.
@@ -47,6 +59,26 @@ type stackApp struct {
 	// Kernel data-replication (ultimate_db / ultimate_keystore).
 	NodeID string
 	Peers  string // id=url,id2=url
+	// Durable host path for /data (empty = emptyDir).
+	DataHostPath string
+	// WorkingDir is the container working directory (prod: /opt/0trust so ./static works).
+	WorkingDir string
+	// HostPaths mounts host directories into the pod (prod: /opt/0trust → static, templates, config).
+	HostPaths []stackHostPath
+	// HostPort: nil = use stack policy; true/false overrides.
+	HostPort *bool
+	// Args are container args (image ENTRYPOINT stays; these are CMD/args).
+	Args []string
+}
+
+// stackHostPath is a hostPath volume mount (same model as production dirty cutover).
+type stackHostPath struct {
+	// Path is the path on the k3s node (often bind-mounted from the controller host).
+	Path string
+	// Mount is the in-pod mount path.
+	Mount string
+	// ReadOnly mounts the volume read-only when true.
+	ReadOnly bool
 }
 
 func stackCatalog() map[string]stackApp {
@@ -65,6 +97,15 @@ func stackCatalog() map[string]stackApp {
 				"MOTIONKB_LISTEN": ":8090",
 				"MOTIONKB_DB":     "/data/motionkb.db",
 				"MOTIONKB_WAL":    "/data/motionkb.wal",
+			},
+		},
+		// TodoTraq (Work) — hybrid engineering delivery + CRM; public brand todotraq.com
+		"work": {
+			Name: "work", Display: "TodoTraq", Repo: "0trust/work", Port: 3098, Component: "todotraq",
+			Env: map[string]string{
+				"WORK_LISTEN": ":3098",
+				"WORK_DB":     "/data/work.db",
+				"WORK_WAL":    "/data/work.wal",
 			},
 		},
 		"ack": {
@@ -98,6 +139,23 @@ func stackCatalog() map[string]stackApp {
 				"SOCIAL_DB":       "/data/social.db",
 				"SOCIAL_WAL":      "/data/social.wal",
 				"SOCIAL_BLOB_DIR": "/data/blobs",
+			},
+		},
+		"gitmesh": {
+			Name: "gitmesh", Display: "GitMesh", Repo: "0trust/gitmesh", Port: 3088, Component: "git-hosting",
+			Env: map[string]string{
+				"GITMESH_LISTEN":    ":3088",
+				"GITMESH_DB":        "/data/gitmesh.db",
+				"GITMESH_WAL":       "/data/gitmesh.wal",
+				"GITMESH_REPO_ROOT": "/data/repos",
+			},
+		},
+		"drive": {
+			Name: "drive", Display: "0Trust Drive", Repo: "0trust/drive", Port: 3095, Component: "drive",
+			Env: map[string]string{
+				"DRIVE_LISTEN": ":3095",
+				"DRIVE_DB":     "/data/drive.db",
+				"DRIVE_WAL":    "/data/drive.wal",
 			},
 		},
 		"platform": {
@@ -188,6 +246,11 @@ func productLinkEnv(app stackApp, all []stackApp, ns string) map[string]string {
 		out["MOTIONKB_SOCIAL_CDN_URL"] = stackClusterServiceURL("social", all, ns, 3085)
 		out["MOTIONKB_WILLIWAW_URL"] = stackClusterServiceURL("williwaw", all, ns, 3081)
 		out["MOTIONKB_DEFCON_URL"] = stackClusterServiceURL("ack", all, ns, 3083)
+	case "work":
+		out["WORK_PUBLIC_URL"] = pub
+		out["WORK_SOCIAL_CDN"] = stackClusterServiceURL("social", all, ns, 3085)
+		out["WORK_WILLIWAW_URL"] = stackClusterServiceURL("williwaw", all, ns, 3081)
+		out["WORK_MOTIONKB_URL"] = stackClusterServiceURL("motionkb", all, ns, 8090)
 	case "ack":
 		out["ACK_PUBLIC_URL"] = pub
 		out["ACK_SOCIAL_CDN_URL"] = stackClusterServiceURL("social", all, ns, 3085)
@@ -249,6 +312,8 @@ func parseStackProducts(raw string) ([]stackApp, error) {
 				p = "ultimate_db"
 			case "ultimate-keystore", "uks", "keystore", "kernel-keystore":
 				p = "ultimate_keystore"
+			case "todotraq", "todo-traq":
+				p = "work"
 			}
 			names = append(names, p)
 		}
@@ -312,17 +377,106 @@ func stackImage(app stackApp, tag string) string {
 type stackStatus struct {
 	mu       sync.RWMutex
 	apps     []map[string]any
+	appsList []stackApp
+	restCfg  *rest.Config
+	client   kubernetes.Interface
 	ns       string
 	tag      string
 	hubOn    bool
 	err      string
 }
 
+func hasStackConfigMount(app stackApp) bool {
+	return strings.TrimSpace(app.ConfigFile) != ""
+}
+
+func stackMountedConfigPath(app stackApp) string {
+	mount := strings.TrimSpace(app.ConfigMount)
+	if mount == "" {
+		mount = "/config"
+	}
+	key := strings.TrimSpace(app.ConfigKey)
+	if key == "" {
+		key = filepath.Base(app.ConfigFile)
+		if key == "." || key == "/" || key == "" {
+			key = "config.yaml"
+		}
+	}
+	return strings.TrimRight(mount, "/") + "/" + key
+}
+
+// k3sCtrAvailable reports whether host-side k3s or ctr can pre-pull images.
+func k3sCtrAvailable() bool {
+	if _, err := exec.LookPath("k3s"); err == nil {
+		return true
+	}
+	if _, err := exec.LookPath("ctr"); err == nil {
+		return true
+	}
+	return false
+}
+
+// publishStackMeshDNS seeds the built-in mesh authority with A records for every
+// stack barge (domain / name.zone → mesh edge IP, usually 127.0.0.1 in lab).
+func publishStackMeshDNS(auth *meshAuthority, apps []stackApp) {
+	if auth == nil {
+		return
+	}
+	edge := resolveMeshEdgeIP()
+	if edge == "" {
+		edge = "127.0.0.1"
+	}
+	// Apex of the mesh product zone.
+	if z := strings.TrimSpace(*meshZone); z != "" {
+		if name, err := auth.PublishA(z, edge); err != nil {
+			log.Printf("[mesh] stack apex %s: %v", z, err)
+		} else {
+			log.Printf("[mesh] stack apex %s → %s", name, edge)
+		}
+	}
+	seen := map[string]bool{}
+	publish := func(raw string) {
+		raw = strings.ToLower(strings.TrimSpace(raw))
+		raw = strings.TrimPrefix(strings.TrimPrefix(raw, "https://"), "http://")
+		if i := strings.IndexByte(raw, '/'); i >= 0 {
+			raw = raw[:i]
+		}
+		if i := strings.IndexByte(raw, ':'); i >= 0 {
+			raw = raw[:i]
+		}
+		if raw == "" || seen[raw] {
+			return
+		}
+		seen[raw] = true
+		name, err := auth.PublishA(raw, edge)
+		if err != nil {
+			log.Printf("[mesh] stack publish %s: %v", raw, err)
+			return
+		}
+		log.Printf("[mesh] stack DNS %s → %s", name, edge)
+	}
+	// stack.{mesh-zone} — auth_proxy + shell operator origin (meshTLS SNI).
+	publish("stack")
+	for _, app := range apps {
+		if d := strings.TrimSpace(app.Domain); d != "" {
+			publish(d)
+		}
+		// Catalog name under mesh zone (e.g. platform.mitigation.local).
+		publish(app.Name)
+		// Public URL host when set.
+		if u := strings.TrimSpace(app.PublicURL); u != "" {
+			publish(u)
+		}
+	}
+}
+
 // resolveStackApps loads product barges from -stack-config/-barge-config YAML
 // or falls back to -stack-products. Shared by -mode stack and -k3s-stack.
 func resolveStackApps() (apps []stackApp, ns, tag string, err error) {
-	ns = strings.TrimSpace(*stackNamespace)
+	// Flag defaults to "0trust-stack"; stack YAML namespace wins when present.
+	flagNS := strings.TrimSpace(*stackNamespace)
 	tag = strings.TrimSpace(*stackTag)
+	ns = flagNS
 
 	if cfgPath := stackConfigPath(); cfgPath != "" {
 		resolved, loadErr := loadStackConfig(cfgPath)
@@ -330,8 +484,8 @@ func resolveStackApps() (apps []stackApp, ns, tag string, err error) {
 			return nil, "", "", fmt.Errorf("stack-config: %w", loadErr)
 		}
 		apps = resolved.Apps
-		if ns == "" {
-			ns = resolved.Namespace
+		if yamlNS := strings.TrimSpace(resolved.Namespace); yamlNS != "" {
+			ns = yamlNS
 		}
 		if tag == "" {
 			tag = resolved.Tag
@@ -339,7 +493,11 @@ func resolveStackApps() (apps []stackApp, ns, tag string, err error) {
 		if h := strings.TrimSpace(resolved.HubHost); h != "" {
 			*hubHost = h
 		}
-		log.Printf("stack loaded config %s barges=%d namespace=%s tag=%s", cfgPath, len(apps), ns, tag)
+		if hp := strings.TrimSpace(resolved.HostPorts); hp != "" {
+			*stackHostPorts = hp
+		}
+		log.Printf("stack loaded config %s barges=%d namespace=%s tag=%s host_ports=%s",
+			cfgPath, len(apps), ns, tag, strings.TrimSpace(*stackHostPorts))
 	} else {
 		apps, err = parseStackProducts(*stackProducts)
 		if err != nil {
@@ -358,6 +516,75 @@ func resolveStackApps() (apps []stackApp, ns, tag string, err error) {
 	return apps, ns, tag, nil
 }
 
+// stackShouldHostPort decides whether a barge binds its zero-config port on the node.
+// Policy (-stack-host-ports / YAML host_ports): products | all | none.
+// Per-barge host_port: true|false overrides the policy.
+func stackShouldHostPort(app stackApp) bool {
+	if app.HostPort != nil {
+		return *app.HostPort
+	}
+	mode := strings.ToLower(strings.TrimSpace(*stackHostPorts))
+	switch mode {
+	case "all", "true", "1", "yes":
+		return true
+	case "none", "false", "0", "off", "cluster", "clusterip":
+		return false
+	default: // products
+		switch app.Name {
+		case "platform", "services":
+			return false
+		default:
+			return true
+		}
+	}
+}
+
+// stackLocalAccessURL is the single-port operator path: always the stack-dash
+// gateway /apps/{name}/ so TunnelTug is one entry (vhosts / stack dash) for all
+// services. hostPort remains optional for direct node binds.
+func stackLocalAccessURL(app stackApp) string {
+	dash := strings.TrimSpace(*stackDashPort)
+	if dash == "" {
+		dash = "4070"
+	}
+	if *stackGateway {
+		return fmt.Sprintf("http://127.0.0.1:%s/apps/%s/", dash, app.Name)
+	}
+	if stackShouldHostPort(app) {
+		return fmt.Sprintf("http://127.0.0.1:%d/", app.Port)
+	}
+	return fmt.Sprintf("http://127.0.0.1:%s/apps/%s/", dash, app.Name)
+}
+
+// stackMeshFQDN is the private mesh DNS name 0TrustOS / gonode provision against
+// (stable SNI / WebAuthn-aligned hostname under -mesh-zone).
+func stackMeshFQDN(app stackApp) string {
+	if d := strings.TrimSpace(app.Domain); d != "" {
+		d = strings.ToLower(d)
+		d = strings.TrimPrefix(strings.TrimPrefix(d, "https://"), "http://")
+		if i := strings.IndexByte(d, '/'); i >= 0 {
+			d = d[:i]
+		}
+		if i := strings.IndexByte(d, ':'); i >= 0 {
+			d = d[:i]
+		}
+		if d != "" {
+			return meshPrivateName(d)
+		}
+	}
+	return meshPrivateName(app.Name)
+}
+
+// stackMeshURL is the HTTPS mesh address (HTTP/3 SNI host). Port is included
+// when the product is not 443 so operators see the full mesh endpoint.
+func stackMeshURL(app stackApp) string {
+	fqdn := stackMeshFQDN(app)
+	if app.Port > 0 && app.Port != 443 && app.Port != 80 {
+		return fmt.Sprintf("https://%s:%d/", fqdn, app.Port)
+	}
+	return fmt.Sprintf("https://%s/", fqdn)
+}
+
 func runStack() {
 	ctx, stop := notifyShutdownContext()
 	defer stop()
@@ -372,6 +599,22 @@ func runStack() {
 		log.Fatalf("stack: %v", err)
 	}
 
+	// Local mesh DNS (TunnelTug authority + VPI stub) so lab hostnames resolve
+	// without editing the public internet DNS — same plane as shield/mesh DoH clients.
+	if meshActive() || vpiActive() {
+		if meshActive() {
+			auth, merr := startMeshAuthority()
+			if merr != nil {
+				log.Fatalf("stack mesh authority: %v", merr)
+			}
+			if auth != nil {
+				defer auth.Close()
+				publishStackMeshDNS(auth, apps)
+			}
+		}
+		startVPIStub(ctx)
+	}
+
 	// Embedded hub (same as barge k3s).
 	if k3sHubEnabled() {
 		if _, err := startK3sBargeHub(ctx, token); err != nil {
@@ -379,21 +622,29 @@ func runStack() {
 		}
 	}
 
-	// Pull each product image into local k3s via k3s ctr (no kubectl).
-	// Images without a registry manifest cannot run — fail that barge hard.
-	for _, app := range apps {
-		img := stackImage(app, tag)
-		if err := ensureK3sBargeImage(ctx, img); err != nil {
-			log.Fatalf("stack pull %s: %v (registry manifest required to run)", img, err)
+	// Pre-pull into local k3s via k3s ctr when available. If k3s/ctr is missing
+	// (e.g. Windows controller + remote/k3d API), kubelet still pulls from the hub.
+	if k3sHubPullEnabled() && !k3sCtrAvailable() {
+		log.Printf("k3s/ctr not on PATH — skipping host pre-pull; kubelet will pull hub images")
+	} else {
+		for _, app := range apps {
+			img := stackImage(app, tag)
+			if err := ensureK3sBargeImage(ctx, img); err != nil {
+				log.Printf("stack pre-pull %s: %v (continuing; kubelet may still pull)", img, err)
+			}
 		}
 	}
 
-	client, err := newKubernetesClient(strings.TrimSpace(*k3sKubeconfig))
+	restCfg, err := restConfigFromKubeconfig(strings.TrimSpace(*k3sKubeconfig))
+	if err != nil {
+		log.Fatalf("stack k3s client: %v", err)
+	}
+	client, err := kubernetes.NewForConfig(restCfg)
 	if err != nil {
 		log.Fatalf("stack k3s client: %v", err)
 	}
 
-	status := &stackStatus{ns: ns, tag: tag, hubOn: k3sHubEnabled()}
+	status := &stackStatus{ns: ns, tag: tag, hubOn: k3sHubEnabled(), appsList: apps, restCfg: restCfg, client: client}
 	if err := reconcileProductStack(ctx, client, ns, tag, apps, status); err != nil {
 		log.Fatalf("stack reconcile: %v", err)
 	}
@@ -403,7 +654,17 @@ func runStack() {
 	}
 	go watchProductStack(ctx, client, ns, apps, status)
 
-	log.Printf("Product stack online namespace=%s tag=%s apps=%d (self-contained k3s, no kubectl)", ns, tag, len(apps))
+	log.Printf("Product stack online namespace=%s tag=%s apps=%d host_ports=%s gateway=%v (self-contained k3s, no kubectl)",
+		ns, tag, len(apps), strings.TrimSpace(*stackHostPorts), *stackGateway)
+	log.Printf("Access: dashboard http://127.0.0.1:%s/  gateway http://127.0.0.1:%s/apps/{name}/  auth+shell %s (mesh DNS+TLS only)",
+		strings.TrimSpace(*stackDashPort), strings.TrimSpace(*stackDashPort), stackAuthPublicOrigin())
+	if meshActive() {
+		log.Printf("Mesh DNS: authority %s  VPI stub %s  zone=.%s / %s  edge=%s",
+			strings.TrimSpace(*meshDNS), strings.TrimSpace(*vpiListen),
+			strings.TrimSpace(*meshTLD), strings.TrimSpace(*meshZone), resolveMeshEdgeIP())
+	} else if vpiActive() {
+		log.Printf("DNS stub: VPI %s (set -mesh for local authority + lab A records)", strings.TrimSpace(*vpiListen))
+	}
 	<-ctx.Done()
 	if *k3sCleanup {
 		delCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -485,6 +746,57 @@ func stackConfigMapName(app stackApp) string {
 	return app.Name + "-config"
 }
 
+// adaptStackConfigContent rewrites shared platform YAML so each face listens on its
+// zero-config port (TRUST_PORT / hostPort). Without this, every face inherits
+// server.port: 8443 from a lab config and readiness on :8460/:8461/… fails.
+func adaptStackConfigContent(raw []byte, app stackApp) []byte {
+	if app.Port <= 0 || len(raw) == 0 {
+		return raw
+	}
+	var doc map[string]interface{}
+	if err := yaml.Unmarshal(raw, &doc); err != nil || doc == nil {
+		return raw
+	}
+	server, _ := doc["server"].(map[string]interface{})
+	if server == nil {
+		// Not a platform-style config; leave unchanged.
+		return raw
+	}
+	port := strconv.Itoa(int(app.Port))
+	server["port"] = port
+	// Lab configs often dual-bind quic on the same port as HTTP.
+	if _, ok := server["quic_port"]; ok {
+		server["quic_port"] = port
+	}
+	if host := strings.TrimSpace(app.Domain); host != "" {
+		host = strings.TrimPrefix(strings.TrimPrefix(host, "https://"), "http://")
+		if i := strings.IndexByte(host, '/'); i >= 0 {
+			host = host[:i]
+		}
+		if i := strings.IndexByte(host, ':'); i >= 0 {
+			host = host[:i]
+		}
+		if host != "" {
+			server["host"] = host
+		}
+	}
+	if pub := strings.TrimSpace(app.PublicURL); pub != "" {
+		server["domain"] = pub
+	} else if host, _ := server["host"].(string); strings.TrimSpace(host) != "" {
+		scheme := strings.TrimSpace(app.PublicScheme)
+		if scheme == "" {
+			scheme = "http"
+		}
+		server["domain"] = fmt.Sprintf("%s://%s:%s", scheme, host, port)
+	}
+	doc["server"] = server
+	out, err := yaml.Marshal(doc)
+	if err != nil {
+		return raw
+	}
+	return out
+}
+
 // ensureStackConfigMap loads app.ConfigFile from the controller host into a ConfigMap.
 func ensureStackConfigMap(ctx context.Context, client kubernetes.Interface, ns string, app stackApp) error {
 	if strings.TrimSpace(app.ConfigFile) == "" {
@@ -494,6 +806,7 @@ func ensureStackConfigMap(ctx context.Context, client kubernetes.Interface, ns s
 	if err != nil {
 		return fmt.Errorf("read config_file %s: %w", app.ConfigFile, err)
 	}
+	raw = adaptStackConfigContent(raw, app)
 	key := strings.TrimSpace(app.ConfigKey)
 	if key == "" {
 		key = filepath.Base(app.ConfigFile)
@@ -511,6 +824,7 @@ func ensureStackConfigMap(ctx context.Context, client kubernetes.Interface, ns s
 			Annotations: map[string]string{
 				"tunneltug.io/managed":     "stack",
 				"tunneltug.io/config-file": app.ConfigFile,
+				"tunneltug.io/listen-port": strconv.Itoa(int(app.Port)),
 			},
 		},
 		Data: map[string]string{key: string(raw)},
@@ -535,9 +849,10 @@ func ensureStackDeployment(ctx context.Context, client kubernetes.Interface, ns 
 		return err
 	}
 	labels := stackLabels(app)
-	replicas := int32(1)
-	if app.Replicas > 0 {
-		replicas = app.Replicas
+	// Honor 0 (scale-to-zero when host systemd owns the public face / hostPort).
+	replicas := app.Replicas
+	if replicas < 0 {
+		replicas = 1
 	}
 	// Build env: generated links + kernel replication URLs first, then catalog/YAML env
 	// so SRE env: overrides always win (including public URLs).
@@ -573,18 +888,101 @@ func ensureStackDeployment(ctx context.Context, client kubernetes.Interface, ns 
 			merged["TRUST_CONFIG"] = cfgPath
 		}
 	}
+	// 0TrustOS product barges: each container is a gonode sidecar + product unit.
+	// entrypoint 0trustos-entry provisions the node when OTRUST_TUNNEL_TOKEN is set.
+	use0TrustOS := *stack0TrustOS && stackAppUses0TrustOS(app)
+	if use0TrustOS {
+		if _, ok := merged["OTRUST_PRODUCT"]; !ok {
+			merged["OTRUST_PRODUCT"] = app.Name
+		}
+		if _, ok := merged["TRUST_PRODUCT"]; !ok {
+			merged["TRUST_PRODUCT"] = app.Name
+		}
+		portStr := strconv.FormatInt(int64(app.Port), 10)
+		if _, ok := merged["OTRUST_PRODUCT_PORT"]; !ok {
+			merged["OTRUST_PRODUCT_PORT"] = portStr
+		}
+		if _, ok := merged["TRUST_PORT"]; !ok {
+			merged["TRUST_PORT"] = portStr
+		}
+		if _, ok := merged["PRODUCT_BIN"]; !ok {
+			// Outside hostPath /opt/0trust so node static mounts cannot hide the binary.
+			merged["PRODUCT_BIN"] = "/usr/local/bin/product"
+		}
+		if _, ok := merged["GONODE_DATA"]; !ok {
+			merged["GONODE_DATA"] = "/var/lib/gonode"
+		}
+		// Product CLI args → entry env (image ENTRYPOINT is 0trustos-entry, not product).
+		if len(app.Args) > 0 {
+			if _, ok := merged["PRODUCT_ARGS"]; !ok {
+				merged["PRODUCT_ARGS"] = strings.Join(app.Args, " ")
+			}
+		} else if app.Name == "services" && hasStackConfigMount(app) {
+			// services needs --config; 0TrustOS unit exec gets PRODUCT_ARGS.
+			if _, ok := merged["PRODUCT_ARGS"]; !ok {
+				merged["PRODUCT_ARGS"] = "--config " + stackMountedConfigPath(app) + " --mode server"
+			}
+		}
+		if tok := strings.TrimSpace(*authToken); tok != "" {
+			if _, ok := merged["OTRUST_TUNNEL_TOKEN"]; !ok {
+				merged["OTRUST_TUNNEL_TOKEN"] = tok
+			}
+		}
+		// Mesh domain/PKI face: gonode phones home to 0trust.cloud, pulls meshTLS,
+		// and publishes this name to nameservice (ns.0trust.cloud / ns.0trust.name).
+		meshFQDN := stackMeshFQDN(app)
+		if _, ok := merged["OTRUST_MESH_DOMAIN"]; !ok {
+			merged["OTRUST_MESH_DOMAIN"] = meshFQDN
+		}
+		if _, ok := merged["MESH_HOST"]; !ok {
+			merged["MESH_HOST"] = app.Name
+		}
+		if _, ok := merged["OTRUST_MESH_URL"]; !ok {
+			merged["OTRUST_MESH_URL"] = stackMeshURL(app)
+		}
+		if _, ok := merged["TRUST_PUBLIC_URL"]; !ok {
+			merged["TRUST_PUBLIC_URL"] = stackMeshURL(app)
+		}
+		if _, ok := merged["OTRUST_PLATFORM_URL"]; !ok {
+			merged["OTRUST_PLATFORM_URL"] = "https://0trust.cloud"
+		}
+		if _, ok := merged["OTRUST_MESH_EDGE"]; !ok {
+			if edge := strings.TrimSpace(*meshEdgeIP); edge != "" {
+				merged["OTRUST_MESH_EDGE"] = edge
+			}
+		}
+		// Sync token for nameservice provision + meshtls cert pull (same as tunnel token in lab).
+		if tok := strings.TrimSpace(*authToken); tok != "" {
+			if _, ok := merged["OTRUST_SYNC_TOKEN"]; !ok {
+				merged["OTRUST_SYNC_TOKEN"] = tok
+			}
+		}
+	}
 	env := make([]corev1.EnvVar, 0, len(merged))
 	for k, v := range merged {
 		env = append(env, corev1.EnvVar{Name: k, Value: v})
 	}
+	// Bind product listen ports on the node so host edge / operators reach barges
+	// without kubectl (http://127.0.0.1:{port}). Policy: -stack-host-ports / host_ports /
+	// per-barge host_port. platform/services default off so bare-metal can own :8443/:443.
+	httpPort := corev1.ContainerPort{
+		Name: "http", ContainerPort: app.Port, Protocol: corev1.ProtocolTCP,
+	}
+	if stackShouldHostPort(app) {
+		httpPort.HostPort = app.Port
+	}
+	// Local k3d / offline: IfNotPresent so rebuilt hub.* tags import via ctr without a pull.
+	// Online hub dogfood still picks up newer digests on next deploy when tags move.
+	pullPolicy := corev1.PullIfNotPresent
+	if k3sHubEnabled() && k3sHubPullEnabled() {
+		pullPolicy = corev1.PullAlways
+	}
 	c := corev1.Container{
 		Name:            app.Name,
 		Image:           image,
-		ImagePullPolicy: corev1.PullAlways,
-		Ports: []corev1.ContainerPort{{
-			Name: "http", ContainerPort: app.Port, Protocol: corev1.ProtocolTCP,
-		}},
-		Env: env,
+		ImagePullPolicy: pullPolicy,
+		Ports:           []corev1.ContainerPort{httpPort},
+		Env:             env,
 		VolumeMounts: []corev1.VolumeMount{{
 			Name: "data", MountPath: "/data",
 		}},
@@ -592,9 +990,23 @@ func ensureStackDeployment(ctx context.Context, client kubernetes.Interface, ns 
 			ProbeHandler: corev1.ProbeHandler{
 				TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt32(app.Port)},
 			},
-			InitialDelaySeconds: 3,
+			InitialDelaySeconds: 5,
 			PeriodSeconds:       5,
+			TimeoutSeconds:      2,
+			FailureThreshold:    12,
 		},
+	}
+	if use0TrustOS {
+		// Durable gonode identity / provision.json beside product data.
+		c.VolumeMounts = append(c.VolumeMounts, corev1.VolumeMount{
+			Name: "gonode", MountPath: "/var/lib/gonode",
+		})
+		// 0TrustOS entry owns CMD — product argv is PRODUCT_ARGS (see above).
+		// Only special modes (anycast / ultimate_*) set c.Args below.
+	}
+	// Prod systemd uses WorkingDirectory=/opt/0trust so relative static/ and templates/ resolve.
+	if wd := strings.TrimSpace(app.WorkingDir); wd != "" {
+		c.WorkingDir = wd
 	}
 	// Anycast image is the TunnelTug binary; run the anycast edge mode.
 	if app.Name == "anycast" {
@@ -636,16 +1048,61 @@ func ensureStackDeployment(ctx context.Context, client kubernetes.Interface, ns 
 			"-uks-node-id", nodeID,
 		}
 	}
+	// Explicit YAML args win / append after mode-specific defaults when set.
+	// For 0TrustOS product faces, args are PRODUCT_ARGS env (entry launches product unit).
+	if len(app.Args) > 0 && !use0TrustOS {
+		c.Args = append([]string(nil), app.Args...)
+	}
+	// services binary does not read TRUST_CONFIG; inject --config when a barge config is mounted.
+	if app.Name == "services" && hasStackConfigMount(app) && len(app.Args) == 0 && !use0TrustOS {
+		cfgPath := stackMountedConfigPath(app)
+		c.Args = []string{"--config", cfgPath, "--mode", "server"}
+	}
 	// Platform-binary faces: TRUST_PORT already set via app.Env (name:8447, orchid-ingest:8451).
-	vols := []corev1.Volume{{
+	dataVol := corev1.Volume{
 		Name: "data",
 		VolumeSource: corev1.VolumeSource{
 			EmptyDir: &corev1.EmptyDirVolumeSource{},
 		},
-	}}
+	}
+	if hp := strings.TrimSpace(app.DataHostPath); hp != "" {
+		t := corev1.HostPathDirectoryOrCreate
+		dataVol.VolumeSource = corev1.VolumeSource{
+			HostPath: &corev1.HostPathVolumeSource{Path: hp, Type: &t},
+		}
+	}
+	vols := []corev1.Volume{dataVol}
+	if use0TrustOS {
+		vols = append(vols, corev1.Volume{
+			Name: "gonode",
+			VolumeSource: corev1.VolumeSource{
+				EmptyDir: &corev1.EmptyDirVolumeSource{},
+			},
+		})
+	}
+
+	// Prod-style host tree (e.g. /opt/0trust with static/, templates/, config/).
+	for i, hp := range app.HostPaths {
+		host := strings.TrimSpace(hp.Path)
+		mnt := strings.TrimSpace(hp.Mount)
+		if host == "" || mnt == "" {
+			continue
+		}
+		volName := fmt.Sprintf("hostpath-%d", i)
+		t := corev1.HostPathDirectoryOrCreate
+		vols = append(vols, corev1.Volume{
+			Name: volName,
+			VolumeSource: corev1.VolumeSource{
+				HostPath: &corev1.HostPathVolumeSource{Path: host, Type: &t},
+			},
+		})
+		c.VolumeMounts = append(c.VolumeMounts, corev1.VolumeMount{
+			Name: volName, MountPath: mnt, ReadOnly: hp.ReadOnly,
+		})
+	}
 
 	// Mount per-barge YAML config when configured (SRE: load barge with yaml config).
-	hasYAMLConfig := strings.TrimSpace(app.ConfigFile) != ""
+	hasYAMLConfig := hasStackConfigMount(app)
 	if hasYAMLConfig {
 		mount := strings.TrimSpace(app.ConfigMount)
 		if mount == "" {
@@ -675,6 +1132,12 @@ func ensureStackDeployment(ctx context.Context, client kubernetes.Interface, ns 
 			},
 		})
 	}
+	// hostPort is exclusive per node. RollingUpdate maxSurge leaves a second
+	// pod Pending forever ("didn't have free ports"). Recreate tears down first.
+	strategy := appsv1.DeploymentStrategy{Type: appsv1.RollingUpdateDeploymentStrategyType}
+	if stackShouldHostPort(app) {
+		strategy = appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType}
+	}
 	dep := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      app.Name,
@@ -687,6 +1150,7 @@ func ensureStackDeployment(ctx context.Context, client kubernetes.Interface, ns 
 		},
 		Spec: appsv1.DeploymentSpec{
 			Replicas: &replicas,
+			Strategy: strategy,
 			Selector: &metav1.LabelSelector{
 				MatchLabels: map[string]string{"app.kubernetes.io/name": app.Name},
 			},
@@ -716,6 +1180,18 @@ func ensureStackDeployment(ctx context.Context, client kubernetes.Interface, ns 
 
 func boolPtr(b bool) *bool { return &b }
 
+// stackAppUses0TrustOS reports whether the barge should run as a 0TrustOS product
+// container (gonode sidecar entry + product unit). Kernel / pure TunnelTug modes
+// keep their own -mode args on the tunneltug binary image.
+func stackAppUses0TrustOS(app stackApp) bool {
+	switch app.Name {
+	case "ultimate-db", "ultimate_db", "ultimate-keystore", "ultimate_keystore", "anycast":
+		return false
+	default:
+		return true
+	}
+}
+
 func watchProductStack(ctx context.Context, client kubernetes.Interface, ns string, apps []stackApp, status *stackStatus) {
 	tag := status.tag
 	ticker := time.NewTicker(5 * time.Second)
@@ -733,23 +1209,35 @@ func watchProductStack(ctx context.Context, client kubernetes.Interface, ns stri
 func refreshStackStatus(ctx context.Context, client kubernetes.Interface, ns string, apps []stackApp, tag string, status *stackStatus) error {
 	rows := make([]map[string]any, 0, len(apps))
 	for _, app := range apps {
-		desired := int32(1)
-		if app.Replicas > 0 {
-			desired = app.Replicas
+		desired := app.Replicas
+		if desired < 0 {
+			desired = 1
 		}
 		row := map[string]any{
-			"name":    app.Name,
-			"display": app.Display,
-			"image":   stackImage(app, tag),
-			"port":    app.Port,
-			"ready":   0,
-			"desired": desired,
-			"phase":   "Unknown",
+			"name":        app.Name,
+			"display":     app.Display,
+			"image":       stackImage(app, tag),
+			"port":        app.Port,
+			"ready":       0,
+			"desired":     desired,
+			"phase":       "Unknown",
+			"host_port":   stackShouldHostPort(app),
+			"access_url":  stackLocalAccessURL(app), // one-port gateway when -stack-gateway
+			"gateway":     fmt.Sprintf("/apps/%s/", app.Name),
+			"mesh_fqdn":   stackMeshFQDN(app),
+			"mesh_url":    stackMeshURL(app),
+			"mesh_host":   app.Name,
+			"0trustos":    stackAppUses0TrustOS(app) && *stack0TrustOS,
 		}
 		dep, err := client.AppsV1().Deployments(ns).Get(ctx, app.Name, metav1.GetOptions{})
 		if err == nil {
 			row["ready"] = dep.Status.ReadyReplicas
-			row["desired"] = dep.Status.Replicas
+			// Prefer spec.replicas (desired) over status.replicas (includes terminating RSes).
+			if dep.Spec.Replicas != nil {
+				row["desired"] = *dep.Spec.Replicas
+			} else {
+				row["desired"] = dep.Status.Replicas
+			}
 			if dep.Status.ReadyReplicas > 0 {
 				row["phase"] = "Ready"
 			} else if dep.Status.UnavailableReplicas > 0 {
@@ -776,44 +1264,510 @@ func runStackDashboard(ctx context.Context, status *stackStatus) {
 		status.mu.RLock()
 		defer status.mu.RUnlock()
 		w.Header().Set("Content-Type", "application/json")
+		meshZone := strings.TrimSpace(*meshZone)
+		if meshZone == "" {
+			meshZone = "tunneltug.tunnel"
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"status":    "ok",
-			"mode":      "stack",
-			"namespace": status.ns,
-			"tag":       status.tag,
-			"hub":       status.hubOn,
-			"apps":      status.apps,
-			"note":      "self-contained k3s reconcile — no kubectl",
+			"status":     "ok",
+			"mode":       "stack",
+			"namespace":  status.ns,
+			"tag":        status.tag,
+			"hub":        status.hubOn,
+			"host_ports": strings.TrimSpace(*stackHostPorts),
+			"gateway":    *stackGateway,
+			"mesh_zone":  meshZone,
+			"mesh_dns":   strings.TrimSpace(*meshDNS),
+			"vpi":        strings.TrimSpace(*vpiListen),
+			"auth":       stackAuthStatusJSON(),
+			"apps":       status.apps,
+			"access": map[string]string{
+				// Loopback: status + app gateway only (no WebAuthn).
+				"dashboard": fmt.Sprintf("http://127.0.0.1:%s/", strings.TrimSpace(*stackDashPort)),
+				"json":      fmt.Sprintf("http://127.0.0.1:%s/_tunneltug/stack", strings.TrimSpace(*stackDashPort)),
+				"apps":      fmt.Sprintf("http://127.0.0.1:%s/apps/{name}/", strings.TrimSpace(*stackDashPort)),
+				// Auth + shell: mesh DNS + meshTLS HTTPS only (WebAuthn cannot use http/localhost).
+				"auth":         stackAuthPublicOrigin() + "/auth",
+				"shell":        stackAuthPublicOrigin() + "/shell?app={name}",
+				"shell_ws":     strings.Replace(stackAuthPublicOrigin(), "https://", "wss://", 1) + "/shell/ws?app={name}",
+				"mesh_host":    stackOperatorMeshHost(),
+				"shell_target": "0trustos-k8s-image",
+			},
+			"note": "auth+shell only on mesh HTTPS (mesh DNS + meshTLS); WebAuthn forbids http/localhost; gonode Junos CLI after passkey+DBSC",
 		})
 	})
+	// 0Trust auth_proxy on meshTLS face: /auth WebAuthn + DBSC (not loopback HTTP).
+	mountStackAuthProxy(mux)
+	// Built-in gateway: reverse-proxy to in-cluster Services via the k8s API (no kubectl).
+	if *stackGateway {
+		mux.Handle("/apps/", stackAppsGateway(status))
+	}
+	// Webshell: mesh HTTPS + auth_proxy → gonode Junos CLI in 0TrustOS image.
+	mountStackWebshell(mux, status)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		status.mu.RLock()
-		apps := append([]map[string]any(nil), status.apps...)
-		ns := status.ns
-		tag := status.tag
-		status.mu.RUnlock()
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		fmt.Fprintf(w, `<html><body><h2>TunnelTug product stack</h2>`)
-		fmt.Fprintf(w, `<p>namespace <code>%s</code> tag <code>%s</code> · self-contained (no kubectl) · <a href="/_tunneltug/stack">JSON</a></p><ul>`, ns, tag)
-		for _, a := range apps {
-			fmt.Fprintf(w, `<li><b>%v</b> %v — %v ready · <code>%v</code></li>`,
-				a["name"], a["phase"], a["ready"], a["image"])
+		if r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
 		}
-		fmt.Fprint(w, `</ul></body></html>`)
+		// GML dashboard (guikit) — same markup language as product UIs.
+		guikit.ServeGML(w, stackDashboardGML, stackDashboardData(status))
 	})
 	addr := "127.0.0.1:" + strings.TrimSpace(*stackDashPort)
 	if _, err := strconv.Atoi(strings.TrimSpace(*stackDashPort)); err != nil {
 		addr = "127.0.0.1:4070"
 	}
-	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	// Host-based mesh on the same port: http://platform.mitigation.mesh:4070/ after hosts/NRPT.
+	// meshTLS HTTPS on -mesh-tls-port for WebAuthn/DBSC (SNI = mesh FQDN).
+	handler := http.Handler(mux)
+	if *stackGateway {
+		handler = stackMeshHostGateway(status, mux)
+	}
+	srv := &http.Server{Addr: addr, Handler: handler, ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		<-ctx.Done()
 		shCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(shCtx)
 	}()
-	log.Printf("Product stack dashboard http://%s/_tunneltug/stack", addr)
+	log.Printf("Product stack dashboard http://%s/  JSON http://%s/_tunneltug/stack  gateway http://%s/apps/{name}/", addr, addr, addr)
+	log.Printf("Auth+shell (mesh DNS + meshTLS HTTPS only): %s/auth  %s/shell?app={name}", stackAuthPublicOrigin(), stackAuthPublicOrigin())
+	if meshActive() {
+		zone := strings.TrimSpace(*meshZone)
+		log.Printf("Mesh one-port: after hosts/NRPT open http://{app}.%s:%s/  (authority %s VPI %s)",
+			zone, strings.TrimSpace(*stackDashPort), strings.TrimSpace(*meshDNS), strings.TrimSpace(*vpiListen))
+	}
+	// HTTPS meshTLS face: product Host gateway + auth_proxy WebAuthn + gonode shell.
+	// Mesh DNS must resolve stack.{zone} / {app}.{zone}; browsers need mesh-root trust.
+	if meshTLSActive() {
+		if err := ensureMeshTLS(); err != nil {
+			log.Printf("[meshtls] stack: %v", err)
+		} else {
+			// Ensure leaf for operator face (stack.{zone}) used by WebAuthn RP ID / SNI.
+			if _, err := ensureMeshTLSLeaf(stackOperatorMeshHost()); err != nil {
+				log.Printf("[meshtls] stack operator leaf: %v", err)
+			}
+			tlsPort := strings.TrimSpace(*meshTLSPort)
+			if tlsPort == "" {
+				tlsPort = "4073"
+			}
+			tlsAddr := "0.0.0.0:" + tlsPort
+			meshHandler := stackMeshTLSHandler(status, mux)
+			tlsSrv := &http.Server{
+				Addr:              tlsAddr,
+				Handler:           meshHandler,
+				TLSConfig:         meshTLSServerConfig(),
+				ReadHeaderTimeout: 10 * time.Second,
+			}
+			go func() {
+				<-ctx.Done()
+				shCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				_ = tlsSrv.Shutdown(shCtx)
+			}()
+			go func() {
+				zone := strings.TrimSpace(*meshZone)
+				log.Printf("MeshTLS HTTPS https://{app}.%s:%s/  auth+shell %s  (mesh-root %s)",
+					zone, tlsPort, stackAuthPublicOrigin(), meshTLSDir())
+				if err := tlsSrv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
+					log.Printf("meshTLS gateway: %v", err)
+				}
+			}()
+		}
+	} else if stackAuthEnabled() {
+		log.Printf("[stack-auth] WARNING: -mesh-tls off — WebAuthn/shell require meshTLS + mesh DNS; enable -mesh-tls")
+	}
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Printf("stack dashboard: %v", err)
 	}
+}
+
+// stackDashboardData builds the template map for ui/stack_dashboard.gml.
+func stackDashboardData(status *stackStatus) map[string]interface{} {
+	status.mu.RLock()
+	defer status.mu.RUnlock()
+	rows := make([]map[string]interface{}, 0, len(status.apps))
+	for _, a := range status.apps {
+		phase := fmt.Sprint(a["phase"])
+		phaseClass := "phase-prog"
+		switch phase {
+		case "Ready":
+			phaseClass = "phase-ready"
+		case "Missing", "Unknown":
+			phaseClass = "phase-bad"
+		}
+		gw := fmt.Sprint(a["gateway"])
+		name := fmt.Sprint(a["name"])
+		meshFQDN := fmt.Sprint(a["mesh_fqdn"])
+		if meshFQDN == "" || meshFQDN == "<nil>" {
+			meshFQDN = meshPrivateName(name)
+		}
+		meshURL := fmt.Sprint(a["mesh_url"])
+		if meshURL == "" || meshURL == "<nil>" {
+			meshURL = "https://" + meshFQDN + "/"
+		}
+		// Operator-facing mesh open: meshTLS HTTPS when available (WebAuthn/DBSC FQDN),
+		// else plain Host routing on stack-dash.
+		dash := strings.TrimSpace(*stackDashPort)
+		if dash == "" {
+			dash = "4070"
+		}
+		meshOpen := fmt.Sprintf("http://%s:%s/", meshFQDN, dash)
+		if meshTLSActive() {
+			tlsPort := strings.TrimSpace(*meshTLSPort)
+			if tlsPort == "" {
+				tlsPort = "4073"
+			}
+			meshOpen = fmt.Sprintf("https://%s:%s/", meshFQDN, tlsPort)
+		}
+		// Prefer gateway as primary open when one-port model is on.
+		openURL := fmt.Sprint(a["access_url"])
+		if *stackGateway && gw != "" && gw != "<nil>" {
+			openURL = gw
+		}
+		rows = append(rows, map[string]interface{}{
+			"Name":        name,
+			"Image":       fmt.Sprint(a["image"]),
+			"Phase":       phase,
+			"PhaseClass":  phaseClass,
+			"Ready":       a["ready"],
+			"Desired":     a["desired"],
+			"Port":        a["port"],
+			"AccessURL":   openURL,
+			"GatewayURL":  gw,
+			"ShowGateway": *stackGateway && gw != "" && gw != "<nil>",
+			// Shell only on mesh HTTPS (auth_proxy + WebAuthn RP ID).
+			"ShellURL":    stackAuthPublicOrigin() + "/shell?app=" + name,
+			"MeshFQDN":    meshFQDN,
+			"MeshURL":     meshOpen,
+			"MeshTLSURL":  meshURL,
+			"ZeroTrustOS": a["0trustos"] == true,
+		})
+	}
+	gwOn := "off"
+	if *stackGateway {
+		gwOn = "on"
+	}
+	meshZone := strings.TrimSpace(*meshZone)
+	if meshZone == "" {
+		meshZone = "tunneltug.tunnel"
+	}
+	return map[string]interface{}{
+		"Title":        "TunnelTug product stack",
+		"Namespace":    status.ns,
+		"Tag":          status.tag,
+		"HostPorts":    strings.TrimSpace(*stackHostPorts),
+		"GatewayOn":    gwOn,
+		"MeshZone":     meshZone,
+		"MeshAuthURL":  stackAuthPublicOrigin() + "/auth",
+		"MeshShellURL": stackAuthPublicOrigin() + "/shell",
+		"Apps":         rows,
+		"Note": "Auth+shell: " + stackAuthPublicOrigin() + " (Mesh CA FQDN TLS via gonode path; not http/localhost). Gateway: /apps/{name}/ on loopback.",
+	}
+}
+
+// stackLookupApp finds a catalog app by name (or underscore/dash variants).
+func stackLookupApp(status *stackStatus, name string) *stackApp {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" {
+		return nil
+	}
+	status.mu.RLock()
+	defer status.mu.RUnlock()
+	for i := range status.appsList {
+		a := &status.appsList[i]
+		if a.Name == name || strings.ReplaceAll(a.Name, "_", "-") == name {
+			return a
+		}
+	}
+	return nil
+}
+
+// stackLookupAppByMeshHost maps Host platform.mitigation.mesh → stackApp.
+func stackLookupAppByMeshHost(status *stackStatus, host string) *stackApp {
+	host = strings.ToLower(strings.TrimSpace(host))
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	if host == "" || host == "127.0.0.1" || host == "localhost" || host == "::1" {
+		return nil
+	}
+	status.mu.RLock()
+	defer status.mu.RUnlock()
+	for i := range status.appsList {
+		a := &status.appsList[i]
+		if stackMeshFQDN(*a) == host {
+			return a
+		}
+		// Bare product name under zone (name.zone).
+		if meshPrivateName(a.Name) == host {
+			return a
+		}
+	}
+	return nil
+}
+
+// rewriteStackGatewayLocation rewrites backend absolute-path redirects so the
+// browser stays under /apps/{name}/ (fixes 302 → /welcome → dash 404).
+// pathPrefix empty means Host-based mesh (no prefix; leave absolute paths alone).
+func rewriteStackGatewayLocation(pathPrefix, backendHost, loc string) string {
+	loc = strings.TrimSpace(loc)
+	if loc == "" || pathPrefix == "" {
+		return loc
+	}
+	prefix := strings.TrimRight(pathPrefix, "/")
+	if strings.HasPrefix(loc, prefix+"/") || loc == prefix {
+		return loc
+	}
+	// Absolute-path redirect from the product (e.g. Location: /welcome).
+	if strings.HasPrefix(loc, "/") && !strings.HasPrefix(loc, "//") {
+		return prefix + loc
+	}
+	u, err := url.Parse(loc)
+	if err != nil || u.Host == "" {
+		return loc
+	}
+	// Same-host or backend hostPort redirects → keep path under gateway prefix.
+	h := strings.ToLower(u.Hostname())
+	bh := strings.ToLower(backendHost)
+	if bh != "" {
+		if bhh, _, err := net.SplitHostPort(bh); err == nil {
+			bh = bhh
+		}
+	}
+	if h == "127.0.0.1" || h == "localhost" || h == bh || strings.HasSuffix(h, ".svc") || strings.Contains(h, ".svc.") {
+		path := u.Path
+		if path == "" {
+			path = "/"
+		}
+		if !strings.HasPrefix(path, prefix+"/") && path != prefix {
+			path = prefix + path
+		}
+		q := ""
+		if u.RawQuery != "" {
+			q = "?" + u.RawQuery
+		}
+		return path + q
+	}
+	return loc
+}
+
+func rewriteStackGatewayResponse(pathPrefix, backendHost string, resp *http.Response) {
+	if pathPrefix == "" {
+		return
+	}
+	if loc := resp.Header.Get("Location"); loc != "" {
+		if next := rewriteStackGatewayLocation(pathPrefix, backendHost, loc); next != loc {
+			resp.Header.Set("Location", next)
+		}
+	}
+	// Cookies scoped to / must be scoped under the gateway prefix.
+	prefix := strings.TrimRight(pathPrefix, "/")
+	if prefix == "" {
+		return
+	}
+	cookies := resp.Header.Values("Set-Cookie")
+	if len(cookies) == 0 {
+		return
+	}
+	resp.Header.Del("Set-Cookie")
+	for _, c := range cookies {
+		if !strings.Contains(strings.ToLower(c), "path=") {
+			resp.Header.Add("Set-Cookie", c+"; Path="+prefix+"/")
+			continue
+		}
+		// Path=/ → Path=/apps/name/
+		lower := strings.ToLower(c)
+		if i := strings.Index(lower, "path=/"); i >= 0 {
+			rest := c[i+len("path=/"):]
+			// only bare root path
+			if rest == "" || rest[0] == ';' || rest[0] == ' ' {
+				end := i + len("path=/")
+				for end < len(c) && c[end] != ';' {
+					end++
+				}
+				pathVal := c[i+len("Path=") : end]
+				if pathVal == "/" {
+					c = c[:i] + "Path=" + prefix + "/" + c[end:]
+				}
+			}
+		}
+		resp.Header.Add("Set-Cookie", c)
+	}
+}
+
+// proxyStackApp reverse-proxies one stack product. pathPrefix is /apps/{name} for
+// path gateway, or "" for Host-based mesh names on the same dash port.
+func proxyStackApp(status *stackStatus, app *stackApp, pathPrefix, subPath string, w http.ResponseWriter, r *http.Request) {
+	if app == nil {
+		http.Error(w, "unknown stack app", http.StatusNotFound)
+		return
+	}
+	if subPath == "" {
+		subPath = "/"
+	}
+	if !strings.HasPrefix(subPath, "/") {
+		subPath = "/" + subPath
+	}
+	backendHost := fmt.Sprintf("127.0.0.1:%d", app.Port)
+
+	// Prefer direct hostPort when bound (fast path on the node).
+	if stackShouldHostPort(*app) {
+		proxy := &httputil.ReverseProxy{
+			Director: func(req *http.Request) {
+				req.URL.Scheme = "http"
+				req.URL.Host = backendHost
+				req.URL.Path = subPath
+				req.URL.RawPath = ""
+				req.Host = backendHost
+				// Preserve original mesh Host when Host-based so apps see SNI/WebAuthn name.
+				if pathPrefix == "" && r.Host != "" {
+					req.Host = r.Host
+					req.Header.Set("X-Forwarded-Host", r.Host)
+				} else if pathPrefix != "" {
+					req.Header.Set("X-Forwarded-Prefix", strings.TrimRight(pathPrefix, "/"))
+					req.Header.Set("X-Forwarded-Host", r.Host)
+				}
+				req.Header.Set("X-Forwarded-Proto", "http")
+			},
+			ModifyResponse: func(resp *http.Response) error {
+				rewriteStackGatewayResponse(pathPrefix, backendHost, resp)
+				return nil
+			},
+			ErrorHandler: func(rw http.ResponseWriter, req *http.Request, err error) {
+				http.Error(rw, "gateway: "+err.Error(), http.StatusBadGateway)
+			},
+		}
+		proxy.ServeHTTP(w, r)
+		return
+	}
+
+	status.mu.RLock()
+	cfg := status.restCfg
+	ns := status.ns
+	status.mu.RUnlock()
+	if cfg == nil {
+		http.Error(w, "stack gateway: no kube rest config", http.StatusServiceUnavailable)
+		return
+	}
+	if err := proxyViaKubeService(cfg, ns, app.Name, app.Port, subPath, pathPrefix, backendHost, r, w); err != nil {
+		http.Error(w, "gateway: "+err.Error(), http.StatusBadGateway)
+	}
+}
+
+// stackAppsGateway proxies /apps/{name}/… to the product (hostPort or k8s service proxy).
+func stackAppsGateway(status *stackStatus) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// /apps/{name}/optional/path
+		restPath := strings.TrimPrefix(r.URL.Path, "/apps/")
+		if restPath == "" || restPath == r.URL.Path {
+			http.Error(w, "usage: /apps/{name}/", http.StatusBadRequest)
+			return
+		}
+		name, sub, _ := strings.Cut(restPath, "/")
+		name = strings.TrimSpace(name)
+		if name == "" {
+			http.Error(w, "missing app name", http.StatusBadRequest)
+			return
+		}
+		app := stackLookupApp(status, name)
+		if app == nil {
+			http.Error(w, "unknown stack app "+name, http.StatusNotFound)
+			return
+		}
+		prefix := "/apps/" + app.Name
+		subPath := "/" + sub
+		if sub == "" {
+			// /apps/name with no trailing slash → /apps/name/
+			if !strings.HasSuffix(r.URL.Path, "/") && r.URL.Path == prefix {
+				http.Redirect(w, r, prefix+"/", http.StatusFound)
+				return
+			}
+			subPath = "/"
+		}
+		proxyStackApp(status, app, prefix, subPath, w, r)
+	})
+}
+
+// stackMeshHostGateway serves products by Host: {app}.zone on the stack-dash port
+// (true one-port: mesh FQDN → 127.0.0.1:4070 after hosts/NRPT).
+func stackMeshHostGateway(status *stackStatus, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if app := stackLookupAppByMeshHost(status, r.Host); app != nil {
+			// Loopback dash control paths (JSON + 0TrustOS shell) stay on reserved prefixes.
+			if strings.HasPrefix(r.URL.Path, "/_tunneltug/") || strings.HasPrefix(r.URL.Path, "/shell") {
+				next.ServeHTTP(w, r)
+				return
+			}
+			proxyStackApp(status, app, "", r.URL.Path, w, r)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// stackMeshTLSHandler is the LAN meshTLS + mesh DNS face:
+// product Host gateway, auth_proxy (/auth WebAuthn+DBSC), and gonode shell.
+// WebAuthn cannot use http:// or localhost — this HTTPS mesh FQDN face is required.
+func stackMeshTLSHandler(status *stackStatus, mux http.Handler) http.Handler {
+	base := mux
+	if *stackGateway {
+		base = stackMeshHostGateway(status, mux)
+	}
+	return base
+}
+
+func proxyViaKubeService(cfg *rest.Config, ns, name string, port int32, path, pathPrefix, backendHost string, r *http.Request, w http.ResponseWriter) error {
+	if path == "" {
+		path = "/"
+	}
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	transport, err := rest.TransportFor(cfg)
+	if err != nil {
+		return err
+	}
+	host := strings.TrimRight(cfg.Host, "/")
+	// cfg.Host may be "https://127.0.0.1:6443" already.
+	// Service proxy form: http:{service}:{port} (colons must not be path-escaped).
+	svcName := fmt.Sprintf("http:%s:%d", name, port)
+	apiPath := fmt.Sprintf("/api/v1/namespaces/%s/services/%s/proxy%s", ns, svcName, path)
+	u, err := url.Parse(host + apiPath)
+	if err != nil {
+		return err
+	}
+	if r.URL.RawQuery != "" {
+		u.RawQuery = r.URL.RawQuery
+	}
+	out, err := http.NewRequestWithContext(r.Context(), r.Method, u.String(), r.Body)
+	if err != nil {
+		return err
+	}
+	// Copy select headers; kube auth is applied by TransportFor(cfg).
+	for k, vv := range r.Header {
+		lk := strings.ToLower(k)
+		if lk == "host" || lk == "authorization" {
+			continue
+		}
+		for _, v := range vv {
+			out.Header.Add(k, v)
+		}
+	}
+	client := &http.Client{Transport: transport, Timeout: 120 * time.Second, CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	resp, err := client.Do(out)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	rewriteStackGatewayResponse(pathPrefix, backendHost, resp)
+	for k, vv := range resp.Header {
+		for _, v := range vv {
+			w.Header().Add(k, v)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+	_, _ = io.Copy(w, resp.Body)
+	return nil
 }

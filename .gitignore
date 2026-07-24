@@ -51,3 +51,9 @@ coverage.html
 .publish-modules/
 .publish-0trust/
 
+# Debug HTML/body scrapes (never commit)
+tmp-*.txt
+tmp-*.html
+tmp_*.html
+tmp_*.txt
+

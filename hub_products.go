@@ -45,6 +45,10 @@ func init() {
 	alias(hubProd("ack", "0trust/ack"), "ack", "defcon")
 	alias(hubProd("motionkb", "0trust/motionkb"), "motionkb", "motion")
 	alias(hubProd("williwaw", "0trust/williwaw"), "williwaw")
+	// TodoTraq (Work) — hybrid delivery + CRM; brand face todotraq.com
+	alias(hubProd("work", "0trust/work"), "work", "todotraq", "todo-traq")
+	alias(hubProd("gitmesh", "0trust/gitmesh"), "gitmesh", "git")
+	alias(hubProd("drive", "0trust/drive"), "drive", "0trust-drive")
 
 	// --- public / edge faces ---
 	// 0Trust Name (gTLD) — ICANN brand face (DoH / RDAP / registrar).
@@ -81,7 +85,7 @@ func init() {
 
 func listHubProductNames() []string {
 	return []string{
-		"mail", "search", "platform", "services", "social", "ack", "motionkb", "williwaw",
+		"mail", "search", "platform", "services", "social", "ack", "motionkb", "williwaw", "work", "gitmesh", "drive",
 		"name", "dbsc_relay", "anycast", "orchid_ingest",
 		"auth", "iam", "access", "scim", "pki", "workflows", "topology", "nameservice", "servicekeys", "vpi", "logs",
 		"ultimate_db", "ultimate_keystore",
@@ -95,8 +99,11 @@ func HubProductCatalogPublic() []map[string]string {
 		{"name": "ack", "display": "Ack", "repo": "0trust/ack", "desc": "Event and community chat"},
 		{"name": "williwaw", "display": "Williwaw", "repo": "0trust/williwaw", "desc": "Social feed and stories"},
 		{"name": "motionkb", "display": "MotionKB", "repo": "0trust/motionkb", "desc": "Docs and published sites"},
+		{"name": "work", "display": "TodoTraq", "repo": "0trust/work", "desc": "Hybrid delivery boards + CRM — brand face todotraq.com"},
 		{"name": "mail", "display": "MeshMail", "repo": "0trust/mail", "desc": "Secure team mail"},
 		{"name": "search", "display": "MeshSearch", "repo": "0trust/search", "desc": "Private search"},
+		{"name": "gitmesh", "display": "GitMesh", "repo": "0trust/gitmesh", "desc": "GitHub replacement — go-git source hosting"},
+		{"name": "drive", "display": "0Trust Drive", "repo": "0trust/drive", "desc": "Private cloud files — folders, previews, CRDT multi-device sync"},
 		{"name": "platform", "display": "0Trust Platform", "repo": "0trust/platform", "desc": "Full identity and control plane"},
 		{"name": "services", "display": "0Trust Services", "repo": "0trust/services", "desc": "Mesh access edge"},
 		{"name": "social", "display": "0Trust CDN", "repo": "0trust/social", "desc": "Media and object CDN"},

@@ -10,7 +10,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Tugconf is a Junos-like hierarchical configuration language for TunnelTug.
+// Tugconf is TunnelTug's hierarchical configuration language (set/delete lines).
 //
 // Commands:
 //
@@ -484,7 +484,7 @@ func treeToSiteConfig(tree map[string]any) (*SiteConfig, error) {
 	return &cfg, nil
 }
 
-// SiteConfigToSetLines emits Junos-like set lines for a site config (display set).
+// SiteConfigToSetLines emits Tugconf set lines for a site config (display set).
 func SiteConfigToSetLines(cfg *SiteConfig) (string, error) {
 	if cfg == nil {
 		return "", fmt.Errorf("nil config")

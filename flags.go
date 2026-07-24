@@ -99,6 +99,11 @@ var (
 	meshPubkey      = flag.String("mesh-pubkey", "", "External mesh gateway Noise pubkey hex (optional platform join)")
 	meshHost        = flag.String("mesh-host", "", "Mesh host_id for this endpoint (default: -subdomain, or 'direct' in direct routing)")
 	meshRegisterURL = flag.String("mesh-register-url", "", "External platform register-mesh URL (default: {platform}/api/v1/access/register-mesh)")
+	// meshTLS: FQDN TLS for WebAuthn RP ID / DBSC / HTTP/3 SNI via platform Mesh CA
+	// (same path as gonode ProvisionMesh — never invent a local CA).
+	meshTLS         = flag.Bool("mesh-tls", true, "Enable meshTLS: platform Mesh CA leaves for mesh FQDNs (WebAuthn/DBSC/SNI)")
+	meshTLSDataDir  = flag.String("mesh-tls-dir", "", "meshTLS cert store (default: {mesh-data-dir}/meshtls); synced from /api/v1/pki/certs/active")
+	meshTLSPort     = flag.String("mesh-tls-port", "4073", "HTTPS port serving Mesh CA FQDN certs (stack/auth/shell; SNI)")
 	vpiStub         = flag.Bool("vpi-stub", false, "Run local VPI DNS stub for private TLD resolution (auto-on with -mesh client or -dns)")
 	vpiUpstream     = flag.String("vpi-upstream", "", "Authoritative NS for private TLDs (default: server mesh-dns or TRUST_VPI_UPSTREAM_NS)")
 	vpiListen       = flag.String("vpi-listen", "127.0.0.1:5354", "VPI stub listen address (UDP)")
@@ -131,10 +136,10 @@ var (
 	hubDist = flag.String("hub-dist", "", "Product binary tree for hub-publish (e.g. 0TrustCloud/deploy/oci/dist)")
 
 	// Product stack: self-contained k3s Deployments (williwaw, motionkb, …) — no kubectl.
-	stackProducts  = flag.String("stack-products", "social,ack,williwaw,motionkb,mail,search,name,dbsc_relay,anycast,orchid_ingest", "Comma-separated apps for -mode stack (or all)")
+	stackProducts  = flag.String("stack-products", "platform,services,social,ack,williwaw,motionkb,mail,search,name,dbsc_relay,anycast,orchid_ingest,ultimate_db,ultimate_keystore", "Comma-separated apps for -mode stack (or all); dogfood includes 0Trust.Cloud + Services")
 	stackNamespace = flag.String("stack-namespace", "0trust-stack", "k3s namespace for product stack")
 	stackTag       = flag.String("stack-tag", "", "Image tag for stack apps (default: -hub-tag or dev)")
-	stackDashPort  = flag.String("stack-dash", "4070", "Product stack dashboard port")
+	stackDashPort  = flag.String("stack-dash", "4070", "Product stack dashboard + built-in app gateway port")
 	// YAML config: each barge is configurable (replicas, env, image, config_file mount).
 	// SRE: tunneltug -mode stack -stack-config config/stack.yaml
 	//      tunneltug -mode barge -k3s-stack -barge-config config/stack.yaml
@@ -142,6 +147,20 @@ var (
 	bargeConfig = flag.String("barge-config", "", "Alias for -stack-config (SRE wording: load the barge with the yaml config)")
 	// When true, barge k3s mode also reconciles the product stack in-process.
 	k3sStack = flag.Bool("k3s-stack", false, "With -mode barge -barge-runtime k3s: also run product stack reconcile (no kubectl)")
+	// hostPort policy for stack Deployments (zero-config access on the node without kubectl).
+	// products = all except platform/services (legacy co-exist with host systemd);
+	// all = every barge including platform/services; none = ClusterIP only (use stack gateway).
+	stackHostPorts = flag.String("stack-host-ports", "products", "Stack hostPort policy: products | all | none (YAML host_ports: overrides)")
+	// Built-in gateway: reverse-proxy stack apps via the k8s API (no kubectl port-forward).
+	stackGateway = flag.Bool("stack-gateway", true, "Expose /apps/{name}/ on stack-dash via k8s service proxy (no kubectl)")
+	// 0TrustOS product barges: inject sidecar provision env (OTRUST_*) so each container
+	// runs gonode + product unit and can enroll at /access/{name}. Images must be built
+	// FROM hub.tunneltug.com/0trust/gonode (see 0TrustCloud/deploy/oci/Dockerfile.runtime).
+	stack0TrustOS = flag.Bool("stack-0trustos", true, "Inject 0TrustOS sidecar provision env into product stack pods")
+	// Shell (gonode Junos CLI) requires 0Trust auth_proxy: WebAuthn + DBSC session.
+	// Identity paths (/auth, /samln, …) are reverse-proxied to the platform plane.
+	stackAuthProxy = flag.Bool("stack-auth-proxy", true, "Require 0Trust auth_proxy (passkey+DBSC) before stack shell / gonode CLI")
+	stackAuthPlatform = flag.String("stack-auth-platform", "", "Identity plane base for stack auth_proxy (default: -mesh-platform or https://0trust.cloud)")
 
 	// Kernel data-replication barges: peer endpoints for product service data
 	// replication (local embeds stay; AddPeer — do not prefer-remote over local).
@@ -149,17 +168,18 @@ var (
 	udbListen  = flag.String("udb-listen", ":8480", "Listen address for -mode ultimate_db kernel replication barge")
 	udbDataDir = flag.String("udb-data", "", "Data dir for ultimate_db replication barge (default: ~/.tunneltug/kernel/ultimate_db)")
 	udbNodeID  = flag.String("udb-node-id", "ultimate-db", "Node id for ultimate_db kernel replication barge")
-	udbPeers   = flag.String("udb-peers", "", "Kernel replication peers id=url,id2=url for scatter-gather")
+	udbPeers   = flag.String("udb-peers", "", "Kernel replication peers id=url,id2=url (scatter-gather + ultimate_sync KV pull)")
 	uksListen  = flag.String("uks-listen", ":8481", "Listen address for -mode ultimate_keystore kernel replication barge")
 	uksDataDir = flag.String("uks-data", "", "Data dir for ultimate_keystore replication barge (default: ~/.tunneltug/kernel/ultimate_keystore)")
 	uksNodeID  = flag.String("uks-node-id", "ultimate-keystore", "Node id for ultimate_keystore kernel replication barge")
+	uksPeers   = flag.String("uks-peers", "", "Keystore kernel peers id=url,id2=url (ultimate_sync KV pull)")
 
-	// Site config: multi-PoP YAML or Junos-like Tugconf (.tug / set lines).
+	// Site config: multi-PoP YAML or Tugconf (.tug / set lines).
 	// Complex global ingress + kernel mesh in one document.
 	siteConfigFlag    = flag.String("config", "", "Site config path: YAML or Tugconf (.tug/.set); TUNNELTUG_CONFIG")
 	sitePopFlag       = flag.String("pop", "", "PoP id when site has pops[] (TUNNELTUG_POP)")
 	siteConfigCheck   = flag.Bool("config-check", false, "Load site config, expand kernel peers, print run plan, exit")
-	siteConfigShowSet = flag.Bool("config-show-set", false, "Print site config as Junos-like set lines, exit")
+	siteConfigShowSet = flag.Bool("config-show-set", false, "Print site config as Tugconf set lines, exit")
 )
 
 type certProvider struct {

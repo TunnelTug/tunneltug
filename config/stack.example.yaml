@@ -17,6 +17,12 @@ namespace: 0trust-stack
 tag: latest
 hub_host: hub.tunneltug.com
 
+# hostPort policy (also -stack-host-ports): products | all | none
+# products = every barge except platform/services (co-exist with host systemd)
+# all      = bind every zero-config port on the node (lab / single-tenant)
+# none     = ClusterIP only — open apps via stack gateway http://127.0.0.1:4070/apps/{name}/
+# host_ports: products
+
 # Optional stack-wide public DNS base (products → https://{name}.{domain};
 # platform faces use the apex). Omit for in-cluster-only PUBLIC_* URLs.
 # domain: example.com
@@ -37,6 +43,15 @@ barges:
   - name: ultimate_keystore
     file: barges/ultimate_keystore.example.yaml
 
+  # --- control plane + mesh access (dogfood path for 0Trust.Cloud / Services) ---
+  - name: platform
+    file: barges/platform.example.yaml
+    # Lab-only: host_port: true   # or set stack host_ports: all
+    # Access without hostPort: http://127.0.0.1:4070/apps/platform/
+  - name: services
+    file: barges/services.example.yaml
+    # args: ["--config", "/config/services.yaml", "--mode", "server"]
+
   - name: social
     file: barges/social.example.yaml
 
@@ -45,6 +60,10 @@ barges:
 
   - name: motionkb
     file: barges/motionkb.example.yaml
+
+  # TodoTraq (Work) — brand face todotraq.com (port 3098)
+  - name: work
+    file: barges/work.example.yaml
 
   - name: ack
     file: barges/ack.example.yaml

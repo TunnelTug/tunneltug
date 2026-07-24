@@ -17,10 +17,10 @@ func TestSplitKernelPeers(t *testing.T) {
 
 func TestStackKernelEnv(t *testing.T) {
 	env := stackKernelEnv("0trust-stack")
-	if env["ULTIMATE_DB_URL"] != "http://ultimate-db.0trust-stack.svc:8480" {
+	if env["ULTIMATE_DB_URL"] != "https://ultimate-db.0trust-stack.svc:8480" {
 		t.Fatal(env["ULTIMATE_DB_URL"])
 	}
-	if env["ULTIMATE_KEYSTORE_URL"] != "http://ultimate-keystore.0trust-stack.svc:8481" {
+	if env["ULTIMATE_KEYSTORE_URL"] != "https://ultimate-keystore.0trust-stack.svc:8481" {
 		t.Fatal(env["ULTIMATE_KEYSTORE_URL"])
 	}
 }

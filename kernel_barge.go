@@ -9,6 +9,7 @@ import (
 
 	"github.com/0TrustCloud/ultimate_db"
 	"github.com/0TrustCloud/ultimate_keystore"
+	"github.com/0TrustCloud/ultimate_sync"
 )
 
 // Kernel data-replication barges (ultimate_db / ultimate_keystore).
@@ -53,7 +54,7 @@ func runUltimateDBBarge() {
 	defer closer()
 
 	transport := ultimate_db.NewHTTPNetworkTransport(nodeID)
-	// Optional static peers (other ultimate_db kernel barges) for scatter-gather.
+	// Optional static peers (other ultimate_db kernel barges) for scatter-gather + KV pull.
 	for _, p := range splitKernelPeers(*udbPeers) {
 		transport.AddPeer(p.id, p.addr)
 	}
@@ -71,8 +72,31 @@ func runUltimateDBBarge() {
 		token = strings.TrimSpace(*authToken)
 	}
 	srv := ultimate_db.NewKernelServer(engine, store, nodeID, token)
-	log.Printf("ultimate_db kernel barge node=%s listen=%s data=%s (dedicated instance, not TunnelTug mesh/SDF)",
-		nodeID, listen, dataDir)
+
+	// ultimate_sync: state machine + KV pull catch-up between kernel barges.
+	syncMach := ultimate_sync.NewMachine(nodeID, ultimate_sync.KindBoth)
+	syncMach.OnMessage(func(msg ultimate_sync.Message) {
+		log.Print(msg.String())
+	})
+	for _, p := range splitKernelPeers(*udbPeers) {
+		syncMach.AddPeer(p.id, p.addr)
+	}
+	srv.AttachSync(syncMach)
+
+	pull := ultimate_db.NewKVPullReplicator(store, nodeID, token)
+	health := &ultimate_sync.HTTPHealthTransport{
+		Token:     token,
+		LocalNode: nodeID,
+	}
+	syncEng := ultimate_sync.NewEngine(syncMach, health, pull)
+	go func() {
+		if err := syncEng.Run(ctx); err != nil && ctx.Err() == nil {
+			log.Printf("ultimate_db sync engine: %v", err)
+		}
+	}()
+
+	log.Printf("ultimate_db kernel barge node=%s listen=%s data=%s peers=%d (ultimate_sync on)",
+		nodeID, listen, dataDir, len(splitKernelPeers(*udbPeers)))
 	if err := srv.ListenAndServe(ctx, listen); err != nil && ctx.Err() == nil {
 		log.Fatalf("ultimate_db barge: %v", err)
 	}
@@ -114,8 +138,34 @@ func runUltimateKeystoreBarge() {
 		token = strings.TrimSpace(*authToken)
 	}
 	srv := ultimate_keystore.NewKernelServer(ks, nodeID, token)
-	log.Printf("ultimate_keystore kernel barge node=%s listen=%s data=%s (dedicated instance)",
-		nodeID, listen, dataDir)
+
+	// Peers: reuse -udb-peers string shape via -uks-peers when set; fall back empty.
+	// Note: uksPeers flag exists on flags.go as udb-style peers for keystore plane.
+	peers := splitKernelPeers(*uksPeers)
+	syncMach := ultimate_sync.NewMachine(nodeID, ultimate_sync.KindKV)
+	syncMach.OnMessage(func(msg ultimate_sync.Message) {
+		log.Print(msg.String())
+	})
+	for _, p := range peers {
+		syncMach.AddPeer(p.id, p.addr)
+	}
+	srv.AttachSync(syncMach)
+
+	// Keystore data is typed KV on the same BTree — full-store pull catch-up.
+	pull := ultimate_db.NewKVPullReplicator(store, nodeID, token)
+	health := &ultimate_sync.HTTPHealthTransport{
+		Token:     token,
+		LocalNode: nodeID,
+	}
+	syncEng := ultimate_sync.NewEngine(syncMach, health, pull)
+	go func() {
+		if err := syncEng.Run(ctx); err != nil && ctx.Err() == nil {
+			log.Printf("ultimate_keystore sync engine: %v", err)
+		}
+	}()
+
+	log.Printf("ultimate_keystore kernel barge node=%s listen=%s data=%s peers=%d (ultimate_sync on)",
+		nodeID, listen, dataDir, len(peers))
 	if err := srv.ListenAndServe(ctx, listen); err != nil && ctx.Err() == nil {
 		log.Fatalf("ultimate_keystore barge: %v", err)
 	}
@@ -186,8 +236,9 @@ func stackKernelEnv(ns string, apps ...stackApp) map[string]string {
 			}
 		}
 	}
-	udb := fmt.Sprintf("http://ultimate-db.%s.svc:%d", ns, udbPort)
-	uks := fmt.Sprintf("http://ultimate-keystore.%s.svc:%d", ns, uksPort)
+	// HTTPS + mesh/cluster DNS names for HTTP/3 SNI (never plain http://).
+	udb := fmt.Sprintf("https://ultimate-db.%s.svc:%d", ns, udbPort)
+	uks := fmt.Sprintf("https://ultimate-keystore.%s.svc:%d", ns, uksPort)
 	return map[string]string{
 		// Replication peer endpoints (add via NetworkTransport.AddPeer — do not replace local DB).
 		"ULTIMATE_DB_URL":           udb,
@@ -198,4 +249,3 @@ func stackKernelEnv(ns string, apps ...stackApp) map[string]string {
 		"KERNEL_KEYSTORE_URL":       uks,
 	}
 }
-

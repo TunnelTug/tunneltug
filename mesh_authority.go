@@ -176,7 +176,8 @@ func startMeshAuthority() (*meshAuthority, error) {
 		return nil, nil
 	}
 	modeVal := strings.ToLower(strings.TrimSpace(*mode))
-	if modeVal != "server" && modeVal != "lb" && modeVal != "orchestrator" {
+	// stack: lab product barges publish A records for local mesh DNS testing.
+	if modeVal != "server" && modeVal != "lb" && modeVal != "orchestrator" && modeVal != "stack" {
 		return nil, nil
 	}
 
@@ -256,6 +257,10 @@ func startMeshAuthority() (*meshAuthority, error) {
 	setGlobalMeshAuthority(auth)
 	log.Printf("[mesh] authority online — zone=%s tld=.%s dns=%s edge=%s data=%s",
 		zone, tld, dnsListen, edgeIP, dataDir)
+	// meshTLS: FQDN HTTPS for WebAuthn/DBSC/SNI via platform Mesh CA (gonode path).
+	if err := ensureMeshTLS(); err != nil {
+		log.Printf("[meshtls] init: %v", err)
+	}
 	return auth, nil
 }
 
@@ -342,6 +347,50 @@ func isMeshPrivateName(domain string) bool {
 		}
 	}
 	return false
+}
+
+// PublishA publishes an A record for name (FQDN or host under the mesh zone) to ip.
+// Used by -mode stack to expose lab barges via mesh DNS without public DNS surgery.
+func (a *meshAuthority) PublishA(name, ip string) (string, error) {
+	if a == nil {
+		return "", fmt.Errorf("mesh authority not running")
+	}
+	name = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(name), "."))
+	ip = strings.TrimSpace(ip)
+	if name == "" {
+		return "", fmt.Errorf("empty DNS name")
+	}
+	if ip == "" {
+		ip = a.edgeIP
+	}
+	// Accept bare host ids (platform) or FQDNs under the zone.
+	if !strings.Contains(name, ".") {
+		name = meshPrivateName(name)
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if name != a.zone && !strings.HasSuffix(name, "."+a.zone) && name != a.tld {
+		// Still allow names under the configured TLD (e.g. auth.mitigation.local).
+		if !strings.HasSuffix(name, "."+a.tld) && name != a.tld {
+			return "", fmt.Errorf("name %s not under mesh zone %s or tld .%s", name, a.zone, a.tld)
+		}
+	}
+	if name != a.zone && name != a.tld {
+		if err := a.registrar.RegisterSubdomain(name, a.ownerPub); err != nil {
+			if meta, getErr := a.registrar.GetOwnership(name); getErr != nil || meta.OwnerPub != a.ownerPub {
+				if !strings.Contains(err.Error(), "already held") && !strings.Contains(err.Error(), "namespace collision") {
+					// Best-effort: still write the A record for lab use.
+					log.Printf("[mesh] register %s: %v (continuing A publish)", name, err)
+				}
+			}
+		}
+	}
+	if err := a.dns.ReplaceZoneType(name, "A", ip, 60); err != nil {
+		return "", fmt.Errorf("publish A %s: %w", name, err)
+	}
+	_ = a.dns.RegisterDomain(name, "TXT", "stack=tunneltug;edge="+ip, 60)
+	a.refreshAuthoritative()
+	return name, nil
 }
 
 // PublishTunnel claims host_id under the product zone and publishes A/TXT records.

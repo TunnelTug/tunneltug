@@ -82,8 +82,8 @@ func resolveMeshSettings() (meshSettings, error) {
 }
 
 func fetchPlatformMesh(platformURL string) (gatewayAddr, gatewayPub string, err error) {
-	client := &http.Client{Timeout: 15 * time.Second}
-	if *insecure {
+	client := httpClientForURL(platformURL, 15*time.Second)
+	if *insecure && !isMeshTLSHostname(platformURL) {
 		client.Transport = &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}} //nolint:gosec
 	}
 	resp, err := client.Get(platformURL + "/api/v1/platform")
@@ -160,7 +160,7 @@ func postBuiltInMeshRegister(hostID string) error {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Tunnel-Token", strings.TrimSpace(*authToken))
-	client := &http.Client{Timeout: 15 * time.Second}
+	client := httpClientForURL(base, 15*time.Second)
 	if *insecure {
 		client.Transport = &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}} //nolint:gosec
 	}
@@ -277,8 +277,8 @@ func registerMeshPeer(cfg meshSettings, pubKey []byte) error {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Tunnel-Token", cfg.RegisterToken)
-	client := &http.Client{Timeout: 15 * time.Second}
-	if *insecure {
+	client := httpClientForURL(cfg.RegisterURL, 15*time.Second)
+	if *insecure && !isMeshTLSHostname(cfg.RegisterURL) {
 		client.Transport = &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}} //nolint:gosec
 	}
 	resp, err := client.Do(req)

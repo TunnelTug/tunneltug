@@ -112,6 +112,11 @@ func clientTLSConfig() *tls.Config {
 	return cfg
 }
 
+// clientTLSConfigForHost uses meshTLS roots when host is a private mesh FQDN.
+func clientTLSConfigForHost(host string) *tls.Config {
+	return tlsConfigForDial(host)
+}
+
 func backendTLSConfig() *tls.Config {
 	cfg := &tls.Config{
 		InsecureSkipVerify: *backendInsecure,

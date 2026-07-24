@@ -4,7 +4,7 @@
 #   tunneltug -config config/site.example.yaml -pop sfo -mode stack -token "$TOKEN"
 #   tunneltug -config config/site.example.yaml -config-show-set
 #
-# Equivalent Junos-like language: config/site.example.tug
+# Equivalent Tugconf language: config/site.example.tug
 #
 # Model: each PoP serves from local embeds; kernel peers sync service data in real time.
 # Never prefer-remote over local — AddPeer the expanded peers only.

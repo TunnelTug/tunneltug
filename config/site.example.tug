@@ -1,4 +1,4 @@
-# TunnelTug Tugconf — Junos-like hierarchical config (same IR as site.example.yaml).
+# TunnelTug Tugconf — hierarchical set/delete config (same IR as site.example.yaml).
 #
 #   tunneltug -config config/site.example.tug -pop sfo -config-check
 #   tunneltug -config config/site.example.tug -pop sfo -mode stack -token "$TOKEN"

@@ -154,11 +154,16 @@ func runBargeK3s() {
 					log.Printf("k3s-stack pull %s: %v", app.Name, err)
 				}
 			}
-			st := &stackStatus{ns: stackNS, tag: tag, hubOn: k3sHubEnabled()}
+			restCfg, cfgErr := restConfigFromKubeconfig(strings.TrimSpace(*k3sKubeconfig))
+			if cfgErr != nil {
+				log.Printf("k3s-stack rest config: %v", cfgErr)
+			}
+			st := &stackStatus{ns: stackNS, tag: tag, hubOn: k3sHubEnabled(), appsList: apps, restCfg: restCfg, client: client}
 			if err := reconcileProductStack(ctx, client, stackNS, tag, apps, st); err != nil {
 				log.Printf("k3s-stack reconcile: %v", err)
 			} else {
-				log.Printf("k3s-stack online namespace=%s apps=%d (self-contained, yaml-configurable)", stackNS, len(apps))
+				log.Printf("k3s-stack online namespace=%s apps=%d host_ports=%s gateway=%v",
+					stackNS, len(apps), strings.TrimSpace(*stackHostPorts), *stackGateway)
 				if !*quiet {
 					go runStackDashboard(ctx, st)
 				}

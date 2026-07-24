@@ -39,6 +39,9 @@ type StackConfigFile struct {
 	Domain string `yaml:"domain" json:"domain"`
 	// PublicScheme is http or https for domain-derived public URLs (default https when domain set).
 	PublicScheme string `yaml:"public_scheme" json:"public_scheme"`
+	// HostPorts is the stack-wide hostPort policy: products | all | none.
+	// Overrides -stack-host-ports when set. Per-barge host_port still wins.
+	HostPorts string `yaml:"host_ports" json:"host_ports"`
 	// Products (barges) to run. Each entry merges over the built-in catalog.
 	Products []BargeProductConfig `yaml:"products" json:"products"`
 	// Barges is an alias for products (SRE wording).
@@ -79,6 +82,21 @@ type BargeProductConfig struct {
 	NodeID string `yaml:"node_id" json:"node_id"`
 	// Peers is kernel replication peers "id=url,id2=url" for scatter-gather across kernel barges.
 	Peers string `yaml:"peers" json:"peers"`
+	// DataHostPath mounts a durable host directory at /data (production products with repos/blobs).
+	// When empty, stack uses emptyDir (ephemeral).
+	DataHostPath string `yaml:"data_host_path" json:"data_host_path"`
+	// WorkingDir is the container working directory (prod platform: /opt/0trust).
+	WorkingDir string `yaml:"working_dir" json:"working_dir"`
+	// HostPaths mounts host dirs into the pod (prod: /opt/0trust for static + templates).
+	HostPaths []struct {
+		Path     string `yaml:"path" json:"path"`
+		Mount    string `yaml:"mount" json:"mount"`
+		ReadOnly bool   `yaml:"read_only" json:"read_only"`
+	} `yaml:"host_paths" json:"host_paths"`
+	// HostPort overrides stack hostPort policy for this barge (true = bind node port, false = ClusterIP only).
+	HostPort *bool `yaml:"host_port" json:"host_port"`
+	// Args are container command args (appended after image entrypoint). e.g. services: ["--config","/config/services.yaml"]
+	Args []string `yaml:"args" json:"args"`
 	// Disabled skips this barge when true.
 	Disabled bool `yaml:"disabled" json:"disabled"`
 }
@@ -90,6 +108,7 @@ type resolvedStack struct {
 	HubHost      string
 	Domain       string
 	PublicScheme string
+	HostPorts    string // products | all | none
 	Apps         []stackApp
 }
 
@@ -217,12 +236,14 @@ func resolveStackConfig(file StackConfigFile, baseDir string) (*resolvedStack, e
 	if len(apps) == 0 {
 		return nil, fmt.Errorf("stack config: no enabled products after resolve")
 	}
+	hostPorts := strings.ToLower(strings.TrimSpace(file.HostPorts))
 	return &resolvedStack{
 		Namespace:    ns,
 		Tag:          tag,
 		HubHost:      hub,
 		Domain:       stackDomain,
 		PublicScheme: publicScheme,
+		HostPorts:    hostPorts,
 		Apps:         apps,
 	}, nil
 }
@@ -296,6 +317,15 @@ func mergeBargeConfig(base, over BargeProductConfig) BargeProductConfig {
 	if strings.TrimSpace(over.Peers) != "" {
 		out.Peers = over.Peers
 	}
+	if strings.TrimSpace(over.DataHostPath) != "" {
+		out.DataHostPath = over.DataHostPath
+	}
+	if over.HostPort != nil {
+		out.HostPort = over.HostPort
+	}
+	if len(over.Args) > 0 {
+		out.Args = append([]string(nil), over.Args...)
+	}
 	if over.Disabled {
 		out.Disabled = true
 	}
@@ -329,7 +359,9 @@ func applyBargeOverrides(base stackApp, cfg BargeProductConfig, defaultTag, hubH
 	}
 	// Align process listen env with Service/container port (catalog zero-config default or YAML port:).
 	syncStackListenEnv(&app)
-	if cfg.Replicas != nil && *cfg.Replicas > 0 {
+	// Explicit replicas (including 0 = scaled down / host owns public face) win.
+	// Omit or leave nil for default 1.
+	if cfg.Replicas != nil {
 		app.Replicas = *cfg.Replicas
 	} else if app.Replicas <= 0 {
 		app.Replicas = 1
@@ -355,6 +387,23 @@ func applyBargeOverrides(base stackApp, cfg BargeProductConfig, defaultTag, hubH
 	app.PublicURL = strings.TrimSpace(cfg.PublicURL)
 	app.NodeID = strings.TrimSpace(cfg.NodeID)
 	app.Peers = strings.TrimSpace(cfg.Peers)
+	app.DataHostPath = strings.TrimSpace(cfg.DataHostPath)
+	app.WorkingDir = strings.TrimSpace(cfg.WorkingDir)
+	if len(cfg.HostPaths) > 0 {
+		app.HostPaths = make([]stackHostPath, 0, len(cfg.HostPaths))
+		for _, hp := range cfg.HostPaths {
+			p := strings.TrimSpace(hp.Path)
+			m := strings.TrimSpace(hp.Mount)
+			if p == "" || m == "" {
+				continue
+			}
+			app.HostPaths = append(app.HostPaths, stackHostPath{Path: p, Mount: m, ReadOnly: hp.ReadOnly})
+		}
+	}
+	app.HostPort = cfg.HostPort
+	if len(cfg.Args) > 0 {
+		app.Args = append([]string(nil), cfg.Args...)
+	}
 
 	if cf := strings.TrimSpace(cfg.ConfigFile); cf != "" {
 		app.ConfigFile = cf

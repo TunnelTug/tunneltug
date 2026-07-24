@@ -8,6 +8,12 @@ It exposes local HTTP services through a **QUIC control tunnel** and a **streami
 
 **License:** [MIT](LICENSE) — free to use, modify, and distribute.
 
+## Operator playbooks
+
+Day-2 procedures for every mode (ACME ownership, fleets, hub/stack, mesh, anycast) live in:
+
+**[docs/playbooks/](docs/playbooks/README.md)** — start with [00-golden-rules.md](docs/playbooks/00-golden-rules.md) and [01-acme-tls.md](docs/playbooks/01-acme-tls.md).
+
 ## Features
 
 - **QUIC control channel** — Clients connect over UDP with TLS (`ALPN: tunneltug`)
@@ -22,8 +28,13 @@ It exposes local HTTP services through a **QUIC control tunnel** and a **streami
 - **Orchestrator** — Namespace-aware control + ingress for multi-fleet ops
 - **Product vhosts** — Co-host apex/www apps next to tunnel subdomains (`-vhosts`)
 - **Built-in mesh** — `secure_dns` + `secure_registrar` private zone (default `*.tunneltug.tunnel`) without an external platform
+- **meshTLS** — Platform Mesh CA leaves for mesh FQDNs (WebAuthn RP ID, DBSC, HTTP/3 SNI); same provision path as 0TrustOS/gonode
+- **Stack gateway + auth** — Built-in `/apps/{name}/` proxy without kubectl; passkey+DBSC auth_proxy before gonode shell
+- **0TrustOS product barges** — Stack pods inject `OTRUST_*` so images `FROM gonode` provision mesh PKI and phone home
+- **Operator playbooks** — Day-2 ACME, vhosts, fleets, hub/stack, mesh, anycast in [docs/playbooks/](docs/playbooks/README.md)
 - **VPI stub** — Local resolver for private TLDs (`.tunnel` / `.mesh` / `.social`)
 - **Anycast edge** — BGP health-gated split-horizon DNS face (`-mode anycast` or `-anycast` sidecar on server/lb)
+- **TodoTraq barge** — Hybrid delivery + CRM product (`work` / `todotraq`, port 3098, brand face `todotraq.com`)
 
 ## Architecture
 
@@ -540,7 +551,7 @@ One document can describe **global ingresses** (anycast/LB/barge per PoP), produ
 | `-config path` | Site YAML **or** Tugconf (`.tug` / `.set` / set-style file) |
 | `-pop id` | Which PoP this process is (`sfo`, `ams`, …) |
 | `-config-check` | Expand + print run plan (kernel peers, roles, paths); exit |
-| `-config-show-set` | Dump config as Junos-like `set` lines; exit |
+| `-config-show-set` | Dump config as Tugconf `set` lines; exit |
 
 **YAML** (`config/site.example.yaml`):
 
@@ -549,7 +560,7 @@ tunneltug -config config/site.example.yaml -pop sfo -config-check
 tunneltug -config config/site.example.yaml -pop sfo -mode stack -token "$TOKEN"
 ```
 
-**Tugconf** — Junos-like hierarchical language, same IR (`config/site.example.tug`):
+**Tugconf** — hierarchical `set`/`delete` language, same IR as YAML (`config/site.example.tug`):
 
 ```
 set site domain example.com
@@ -645,6 +656,17 @@ Stack-level: `namespace`, `tag`, `hub_host`, **`domain`**, **`public_scheme`**.
 Every published product has an example under `config/barges/*.example.yaml`. See `config/stack.example.yaml`.
 
 **Public domains:** set stack `domain:` and/or per-barge `domain:` / `public_url:`. TunnelTug does **not** hardcode product hostnames into barge env — omit domain for in-cluster-only `PUBLIC_*` URLs (`http://{name}.{ns}.svc:{port}`). Sibling service links use each barge’s YAML/catalog port from the live stack (not fixed foreign ports).
+
+**Access without kubectl** (built into `-mode stack`):
+
+| Path | URL |
+|------|-----|
+| Dashboard (GML / guikit) | `http://127.0.0.1:4070/` (`-stack-dash`, source `ui/stack_dashboard.gml`) |
+| JSON | `http://127.0.0.1:4070/_tunneltug/stack` |
+| App gateway | `http://127.0.0.1:4070/apps/{name}/` (k8s API service proxy) |
+| hostPort | `http://127.0.0.1:{zero-config-port}/` when policy binds the node |
+
+hostPort policy: `-stack-host-ports products|all|none` or YAML `host_ports:` / per-barge `host_port:`. Default `products` skips platform/services so bare-metal can own `:8443`/`:443`. Lab stacks often set `host_ports: all`.
 
 ### Kernel data-replication barges (`ultimate_db` / `ultimate_keystore`)
 

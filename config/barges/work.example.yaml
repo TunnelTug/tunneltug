@@ -1,0 +1,34 @@
+# TodoTraq (Work) barge — hybrid delivery boards + CRM.
+# Brand face: todotraq.com · mesh face: work.0trust.cloud (or stack domain).
+#
+# Stack include:
+#   barges:
+#     - name: work
+#       file: barges/work.example.yaml
+#
+# Hub aliases: work, todotraq
+# Zero-config port: 3098
+
+name: work
+replicas: 1
+# port: 3098
+# tag: canary
+# image: hub.tunneltug.com/0trust/work:latest
+
+# Public brand face (production):
+domain: todotraq.com
+public_url: https://todotraq.com
+
+env:
+  WORK_LOG_LEVEL: info
+  WORK_LISTEN: ":3098"
+  # Override generated WORK_PUBLIC_URL if needed:
+  # WORK_PUBLIC_URL: https://todotraq.com
+  # WORK_AUTH_URL: https://0trust.cloud
+  # WORK_IDP_URL: https://0trust.cloud
+  # WORK_SOCIAL_CDN: https://0trust.social
+  # WORK_WILLIWAW_URL: https://williwaw.app
+  # WORK_MOTIONKB_URL: https://motionkb.com
+  # OTRUST_CLIENT_ID: Work
+  # OTRUST_REDIRECT_URI: https://todotraq.com/auth/callback
+  # WORK_ALLOWED_ORIGINS: "https://todotraq.com,https://www.todotraq.com,https://work.0trust.cloud"

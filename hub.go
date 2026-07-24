@@ -205,6 +205,12 @@ func (h *hubServer) handleV2(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// GET /v2/_catalog — list repositories (public read)
+	if path == "_catalog" || strings.HasPrefix(path, "_catalog?") {
+		h.handleOCICatalog(w, r)
+		return
+	}
+
 	// /v2/<name>/manifests/<ref>
 	// /v2/<name>/blobs/<digest>
 	// /v2/<name>/blobs/uploads[/uuid]
@@ -518,6 +524,58 @@ func (h *hubServer) commitBlob(digest string, data []byte) error {
 		return fmt.Errorf("digest mismatch")
 	}
 	return h.store.Put(hubBlobKey(digest), data, "application/octet-stream")
+}
+
+// handleOCICatalog implements GET /v2/_catalog for registry clients.
+func (h *hubServer) handleOCICatalog(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		hubError(w, http.StatusMethodNotAllowed, "UNSUPPORTED", "method not allowed")
+		return
+	}
+	// Prefer indexed repos under manifests/ if store can list.
+	keys, err := h.store.ListPrefix("manifests/")
+	repos := map[string]struct{}{}
+	if err == nil {
+		for _, k := range keys {
+			// manifests/{name}/...
+			rest := strings.TrimPrefix(k, "manifests/")
+			// name may contain slashes (0trust/platform); take first two segments when present
+			parts := strings.Split(rest, "/")
+			if len(parts) >= 2 && (parts[0] == "0trust" || parts[0] == "tunneltug") {
+				repos[parts[0]+"/"+parts[1]] = struct{}{}
+			} else if len(parts) >= 1 && parts[0] != "" {
+				// single-segment repo names
+				if len(parts) == 1 || parts[1] == "" {
+					continue
+				}
+			}
+		}
+	}
+	// Always include static product catalog repos so the hub UI/config builder
+	// has a stable list even when the blob store is empty or list fails.
+	for _, p := range HubProductCatalogPublic() {
+		if repo, ok := p["repo"]; ok && repo != "" {
+			repos[repo] = struct{}{}
+		}
+	}
+	list := make([]string, 0, len(repos))
+	for r := range repos {
+		list = append(list, r)
+	}
+	// stable order
+	for i := 0; i < len(list); i++ {
+		for j := i + 1; j < len(list); j++ {
+			if list[j] < list[i] {
+				list[i], list[j] = list[j], list[i]
+			}
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method == http.MethodHead {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{"repositories": list})
 }
 
 func (h *hubServer) handleTagsList(w http.ResponseWriter, r *http.Request, name string) {

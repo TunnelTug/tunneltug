@@ -15,7 +15,7 @@ import (
 // Load with:
 //
 //	tunneltug -config config/site.example.yaml -pop sfo ...
-//	tunneltug -config site.tug -pop sfo ...   # Junos-like Tugconf (set/delete)
+//	tunneltug -config site.tug -pop sfo ...   # Tugconf (set/delete)
 //
 // Same IR for YAML and Tugconf. CLI flags always win over site file values.
 

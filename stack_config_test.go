@@ -363,11 +363,11 @@ barges:
 
 func TestStackKernelEnv_YAMLPort(t *testing.T) {
 	env := stackKernelEnv("demo")
-	if env["ULTIMATE_DB_URL"] != "http://ultimate-db.demo.svc:8480" {
+	if env["ULTIMATE_DB_URL"] != "https://ultimate-db.demo.svc:8480" {
 		t.Fatal(env)
 	}
 	env = stackKernelEnv("demo", stackApp{Name: "ultimate-db", Port: 18480}, stackApp{Name: "ultimate-keystore", Port: 18481})
-	if env["ULTIMATE_DB_URL"] != "http://ultimate-db.demo.svc:18480" || env["ULTIMATE_KEYSTORE_URL"] != "http://ultimate-keystore.demo.svc:18481" {
+	if env["ULTIMATE_DB_URL"] != "https://ultimate-db.demo.svc:18480" || env["ULTIMATE_KEYSTORE_URL"] != "https://ultimate-keystore.demo.svc:18481" {
 		t.Fatal(env)
 	}
 }

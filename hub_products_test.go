@@ -10,8 +10,9 @@ func TestParseHubProductList(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(all) != 26 {
-		t.Fatalf("all (%d): %v", len(all), all)
+	wantN := len(listHubProductNames())
+	if len(all) != wantN {
+		t.Fatalf("all (%d want %d): %v", len(all), wantN, all)
 	}
 	joinedAll := strings.Join(all, ",")
 	if !strings.Contains(joinedAll, "ultimate_db") || !strings.Contains(joinedAll, "ultimate_keystore") {

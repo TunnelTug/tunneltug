@@ -2,6 +2,8 @@
 
 This guide describes **deployment shapes** you can build with TunnelTug — from a single laptop tunnel to multi-region anycast with real-time kernel replication.
 
+**Operator playbooks** (ACME, fleets, hub, diagnostics): [playbooks/README.md](playbooks/README.md).
+
 Config surfaces:
 
 | Surface | Use |

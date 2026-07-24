@@ -42,7 +42,7 @@ type hubBuilderProduct struct {
 func hubBuilderCatalog() []hubBuilderProduct {
 	// Ports align with stackCatalog zero-config defaults.
 	ports := map[string]int{
-		"williwaw": 3081, "motionkb": 8090, "ack": 3083, "mail": 3086, "search": 3087,
+		"williwaw": 3081, "motionkb": 8090, "ack": 3083, "mail": 3086, "search": 3087, "gitmesh": 3088, "drive": 3095,
 		"social": 3085, "platform": 8443, "services": 8080, "name": 8447, "dbsc_relay": 8450,
 		"anycast": 9099, "orchid_ingest": 8451, "auth": 8460, "iam": 8461, "access": 8462,
 		"scim": 8463, "pki": 8464, "workflows": 8465, "topology": 8466, "nameservice": 8467,
@@ -64,6 +64,8 @@ func hubBuilderCatalog() []hubBuilderProduct {
 		"ack":      {"social", "ultimate_db"},
 		"mail":     {"ultimate_db", "ultimate_keystore"},
 		"search":   {"ultimate_db"},
+		"gitmesh":  {"ultimate_db"},
+		"drive":    {"social", "ultimate_db"},
 		"social":   {"ultimate_db"},
 	}
 	var out []hubBuilderProduct
@@ -143,10 +145,12 @@ h2{font-size:1.1rem;margin:0 0 12px;color:var(--accent);text-transform:uppercase
 .badge{display:inline-block;padding:2px 10px;border-radius:999px;font-size:12px;font-weight:600;background:rgba(34,211,238,.15);color:var(--accent);margin:0 6px 16px 0}
 .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:18px 20px;margin:0 0 16px}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px}
-.arch{background:var(--panel2);border:1px solid var(--border);border-radius:10px;padding:14px 14px 12px;cursor:default}
+.arch{background:var(--panel2);border:1px solid var(--border);border-radius:10px;padding:14px 14px 12px;cursor:pointer;text-align:left;transition:border-color .15s;font:inherit;color:inherit;display:block;width:100%}
+.arch:hover{border-color:var(--accent)}
 .arch .id{font-size:11px;font-weight:700;color:var(--accent2);letter-spacing:.06em}
 .arch h3{margin:4px 0 6px;font-size:14px}
 .arch p{margin:0;font-size:12px;color:var(--muted)}
+.arch .hint{margin:8px 0 0;font-size:11px;color:var(--accent)}
 .prod{background:var(--panel2);border:1px solid var(--border);border-radius:10px;padding:14px;display:flex;flex-direction:column;gap:8px;min-height:150px}
 .prod h3{margin:0;font-size:15px}
 .prod .repo{font-size:11px;color:var(--muted);font-family:ui-monospace,monospace;word-break:break-all}
@@ -196,7 +200,7 @@ code{font-size:12px;color:#e6edf3}
   <div class="badge">MIT License</div>
   <div class="badge">public pull · authenticated push</div>
   <h1>TunnelTug image hub</h1>
-  <p class="lead">OCI registry for fleets and product images. Browse <strong>architectures</strong> and open any product’s <strong>config builder</strong> for site YAML + Junos-like Tugconf — scale replicas, link services, or run multiple instances of the same service.</p>
+  <p class="lead">OCI registry for fleets and product images. Browse <strong>architectures</strong> (click a card for YAML + Tugconf examples) and open any product’s <strong>config builder</strong> — scale replicas, link services, or run multiple instances of the same service.</p>
 
   <div class="card">
     <h2>Registry</h2>
@@ -248,11 +252,21 @@ code{font-size:12px;color:#e6edf3}
         <div class="field">
           <label>Architecture</label>
           <select id="f-arch">
+            <option value="A1">A1 Dev tunnel</option>
+            <option value="A2">A2 Production apex</option>
+            <option value="A3">A3 Multi-tenant subdomains</option>
+            <option value="A4">A4 LB + barge fleet (+ stack)</option>
             <option value="A5">A5 Product stack (single region)</option>
             <option value="A6">A6 Multi-PoP + kernel mesh</option>
-            <option value="R2">R2 Resilient global anycast</option>
-            <option value="A4">A4 LB + barge fleet (+ stack)</option>
+            <option value="A7">A7 Anycast edge</option>
+            <option value="A8">A8 Vhosts + tunnels</option>
+            <option value="A9">A9 Mesh-only private</option>
+            <option value="A10">A10 Hub image pipeline</option>
             <option value="R1">R1 Resilient HA tunnel edge</option>
+            <option value="R2">R2 Resilient global anycast</option>
+            <option value="R3">R3 Vhost failover</option>
+            <option value="R4">R4 Kernel replication</option>
+            <option value="R5">R5 Image integrity</option>
           </select>
         </div>
         <div class="field">
@@ -316,11 +330,33 @@ code{font-size:12px;color:#e6edf3}
   let lastYaml = '', lastTug = '', lastRun = '';
 
   archs.forEach(a => {
-    const el = document.createElement('div');
+    const el = document.createElement('button');
+    el.type = 'button';
     el.className = 'arch';
-    el.innerHTML = '<div class="id">'+esc(a.id)+'</div><h3>'+esc(a.name)+'</h3><p>'+esc(a.summary)+'</p>';
+    el.innerHTML = '<div class="id">'+esc(a.id)+'</div><h3>'+esc(a.name)+'</h3><p>'+esc(a.summary)+'</p><p class="hint">View YAML + Tugconf →</p>';
+    el.addEventListener('click', () => openArchModal(a));
     archGrid.appendChild(el);
   });
+
+  function openArchModal(a){
+    // Sample product for scale/link generation; architecture drives the shape.
+    const sample = catalog.find(p => p.name === 'williwaw') || catalog.find(p => p.name === 'platform') || catalog[0];
+    if (!sample) return;
+    openModal(sample);
+    document.getElementById('modal-title').textContent = a.id + ' — ' + a.name;
+    document.getElementById('modal-sub').textContent = a.summary + ' · example product: ' + sample.display;
+    const sel = document.getElementById('f-arch');
+    if (sel) {
+      if (![...sel.options].some(o => o.value === a.id)) {
+        const opt = document.createElement('option');
+        opt.value = a.id;
+        opt.textContent = a.id + ' ' + a.name;
+        sel.appendChild(opt);
+      }
+      sel.value = a.id;
+    }
+    regenerate();
+  }
 
   catalog.forEach(p => {
     const el = document.createElement('div');

@@ -6,6 +6,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/hashicorp/yamux"
@@ -57,12 +58,24 @@ func runServer() {
 	}
 
 	controlAddr := ":" + *controlPort
-	controlLn, err := listenControlQUIC(controlAddr, certs.controlTLS)
+	// Dual ALPN: "tunneltug" (yamux barge clients) + "secure-overlay" (gonode / secure_network mesh).
+	controlLn, err := listenControlQUICDual(controlAddr, certs.controlTLS)
 	if err != nil {
 		log.Fatalf("Failed to bind QUIC control port: %v", err)
 	}
-	log.Printf("Listening for tunnel clients on QUIC %s (TLS)", controlAddr)
-	go manager.serveControl(ctx, controlLn)
+	var meshAgent *meshAgentGateway
+	if meshActive() {
+		var merr error
+		meshAgent, merr = newMeshAgentGateway()
+		if merr != nil {
+			log.Printf("[mesh-agent] gateway keys: %v (secure-overlay agents disabled)", merr)
+		} else {
+			log.Printf("[mesh-agent] secure-overlay gateway ready on QUIC %s pubkey=%s", controlAddr, meshAgent.PubHex())
+			log.Printf("[mesh-agent] gonode: -gateway 127.0.0.1:%s -gateway-pub %s", strings.TrimPrefix(controlAddr, ":"), meshAgent.PubHex())
+		}
+	}
+	log.Printf("Listening for tunnel clients on QUIC %s (TLS ALPN tunneltug|secure-overlay)", controlAddr)
+	go manager.serveControl(ctx, controlLn, meshAgent)
 
 	ingress := manager.startPublicHTTP(certs)
 	startServerLBRegistration(ctx)
@@ -89,7 +102,7 @@ func serveACME(ctx context.Context, mgr *autocert.Manager) {
 	}
 }
 
-func (m *ServerManager) serveControl(ctx context.Context, listener *quic.Listener) {
+func (m *ServerManager) serveControl(ctx context.Context, listener *quic.Listener, meshAgent *meshAgentGateway) {
 	for {
 		conn, err := listener.Accept(ctx)
 		if err != nil {
@@ -99,6 +112,15 @@ func (m *ServerManager) serveControl(ctx context.Context, listener *quic.Listene
 			continue
 		}
 		go func(c *quic.Conn) {
+			proto := ""
+			if st := c.ConnectionState(); st.TLS.NegotiatedProtocol != "" {
+				proto = st.TLS.NegotiatedProtocol
+			}
+			// 0TrustOS / secure_network mesh agents (Noise), not yamux barge clients.
+			if proto == meshAgentALPN && meshAgent != nil {
+				meshAgent.handleConn(ctx, c)
+				return
+			}
 			controlConn, err := acceptControlQUICConn(ctx, c)
 			if err != nil {
 				return

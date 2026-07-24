@@ -76,6 +76,7 @@ Same registry hosts **0Trust apps** and the **TunnelTug engine**:
 | Ack | `hub.tunneltug.com/0trust/ack:<tag>` |
 | Williwaw | `hub.tunneltug.com/0trust/williwaw:<tag>` |
 | MotionKB | `hub.tunneltug.com/0trust/motionkb:<tag>` |
+| TodoTraq (Work) | `hub.tunneltug.com/0trust/work:<tag>` |
 | 0Trust Name (gTLD) | `hub.tunneltug.com/0trust/name:<tag>` |
 | DBSC Relay | `hub.tunneltug.com/0trust/dbsc-relay:<tag>` |
 | Anycast edge | `hub.tunneltug.com/0trust/anycast:<tag>` |

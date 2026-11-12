@@ -9,7 +9,7 @@ import (
 
 func TestExpandSite_FullMeshKernelPeers(t *testing.T) {
 	cfg := &SiteConfig{
-		Site: SiteMeta{Name: "global", Domain: "example.com", PublicScheme: "https"},
+		Site:       SiteMeta{Name: "global", Domain: "example.com", PublicScheme: "https"},
 		KernelMesh: &KernelMeshPolicy{Mode: "full-mesh"},
 		Stack: &StackConfigFile{
 			Namespace: "0trust-stack",
@@ -20,20 +20,20 @@ func TestExpandSite_FullMeshKernelPeers(t *testing.T) {
 		},
 		Pops: []PopConfig{
 			{
-				ID: "sfo",
-				Roles: []string{"stack", "kernel", "anycast"},
+				ID:     "sfo",
+				Roles:  []string{"stack", "kernel", "anycast"},
 				Domain: "sfo.example.com",
 				Kernel: &PopKernel{
-					UltimateDB: &KernelNode{NodeID: "udb-sfo", URL: "https://kernel-db.sfo.example.com:8480"},
+					UltimateDB:       &KernelNode{NodeID: "udb-sfo", URL: "https://kernel-db.sfo.example.com:8480"},
 					UltimateKeystore: &KernelNode{NodeID: "uks-sfo", URL: "https://kernel-ks.sfo.example.com:8481"},
 				},
 			},
 			{
-				ID: "ams",
-				Roles: []string{"stack", "kernel"},
+				ID:     "ams",
+				Roles:  []string{"stack", "kernel"},
 				Domain: "ams.example.com",
 				Kernel: &PopKernel{
-					UltimateDB: &KernelNode{NodeID: "udb-ams", URL: "https://kernel-db.ams.example.com:8480"},
+					UltimateDB:       &KernelNode{NodeID: "udb-ams", URL: "https://kernel-db.ams.example.com:8480"},
 					UltimateKeystore: &KernelNode{NodeID: "uks-ams", URL: "https://kernel-ks.ams.example.com:8481"},
 				},
 			},
@@ -255,5 +255,91 @@ func TestManualKernelPeersNotOverwritten(t *testing.T) {
 	}
 	if plan.KernelDBPeers != "custom=http://custom:9" {
 		t.Fatalf("manual peers should win: %q", plan.KernelDBPeers)
+	}
+}
+
+func TestSandboxRoundTrip(t *testing.T) {
+	cfg := &SiteConfig{
+		Site: SiteMeta{Name: "sandbox", Domain: "example.com"},
+		Pops: []PopConfig{{ID: "sfo", Roles: []string{"stack"}}},
+		Sandboxes: []SiteSandbox{{
+			Name:     "sandbox",
+			Pop:      "sfo",
+			CPUs:     8,
+			MemoryMB: 12288,
+			DataGB:   256,
+			KubePort: 16443,
+			Shares: []SiteSandboxShare{{
+				Name:     "work",
+				Host:     `C:\src\share`,
+				Mount:    "/mnt/work",
+				ReadOnly: true,
+			}},
+		}},
+	}
+	lines, err := SiteConfigToSetLines(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg2, err := parseTugconf(lines, ".")
+	if err != nil {
+		t.Fatalf("%s\n%v", lines, err)
+	}
+	if len(cfg2.Sandboxes) != 1 {
+		t.Fatalf("%s\n%+v", lines, cfg2.Sandboxes)
+	}
+	sb := cfg2.Sandboxes[0]
+	if sb.Name != "sandbox" || sb.Pop != "sfo" || sb.CPUs != 8 || sb.MemoryMB != 12288 || sb.DataGB != 256 || sb.KubePort != 16443 {
+		t.Fatalf("%s\n%+v", lines, sb)
+	}
+	if len(sb.Shares) != 1 || sb.Shares[0].Name != "work" || sb.Shares[0].Host != `C:\src\share` || sb.Shares[0].Mount != "/mnt/work" || !sb.Shares[0].ReadOnly {
+		t.Fatalf("%s\n%+v", lines, sb.Shares)
+	}
+	plan, err := ExpandSite(cfg2, "sfo", ".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Sandbox == nil || plan.Sandbox.Name != "sandbox" || len(plan.Sandbox.Shares) != 1 {
+		t.Fatalf("%+v", plan.Sandbox)
+	}
+}
+
+func TestLoadSiteSandboxExample(t *testing.T) {
+	cfg, err := loadSiteAny(filepath.Join("config", "site.sandbox.example.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := ExpandSite(cfg, "sfo", "config")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Sandbox == nil || plan.Sandbox.Name != "sandbox" || plan.Sandbox.MemoryMB != 12288 || plan.Sandbox.KubePort != 16443 {
+		t.Fatalf("%+v", plan.Sandbox)
+	}
+	if len(plan.Sandbox.Shares) != 1 || plan.Sandbox.Shares[0].Mount != "/mnt/work" {
+		t.Fatalf("%+v", plan.Sandbox.Shares)
+	}
+	if !strings.Contains(FormatSiteRunPlan(plan), "name:       sandbox") {
+		t.Fatal(FormatSiteRunPlan(plan))
+	}
+}
+
+func TestSandboxRejectsSmallMemory(t *testing.T) {
+	cfg := &SiteConfig{
+		Pops:      []PopConfig{{ID: "sfo"}},
+		Sandboxes: []SiteSandbox{{Name: "sandbox", Pop: "sfo", MemoryMB: 128}},
+	}
+	if _, err := ExpandSite(cfg, "sfo", "."); err == nil {
+		t.Fatal("expected memory rejection")
+	}
+}
+
+func TestSandboxRejectsUnknownPop(t *testing.T) {
+	cfg := &SiteConfig{
+		Pops:      []PopConfig{{ID: "sfo"}},
+		Sandboxes: []SiteSandbox{{Name: "sandbox", Pop: "ams"}},
+	}
+	if _, err := ExpandSite(cfg, "sfo", "."); err == nil {
+		t.Fatal("expected unknown pop")
 	}
 }

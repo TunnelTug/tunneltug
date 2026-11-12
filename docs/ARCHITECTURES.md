@@ -10,7 +10,7 @@ Config surfaces:
 |---------|-----|
 | **Flags / env** | Simple single-process runs |
 | **Stack YAML** (`-stack-config`) | Product barges in one cluster |
-| **Site YAML / Tugconf** (`-config`) | Multi-PoP global sites |
+| **Site YAML / Tugconf** (`-config`) | Multi-PoP global sites, including the sandbox (the TunnelVM node) |
 | **Hub config builder** | `https://hub.tunneltug.com` — modal per image that emits YAML + Tugconf |
 
 Interactive builder: open any product on [hub.tunneltug.com](https://hub.tunneltug.com), click **Configure**, scale/link services, copy **YAML** or **Tugconf**.

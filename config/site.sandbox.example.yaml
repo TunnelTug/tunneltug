@@ -1,0 +1,65 @@
+# Site document. The sandbox is the TunnelVM: the k3s node this pop's stack
+# schedules onto. Product workloads stay barges.
+#
+#   tunneltug -config config/site.sandbox.example.yaml -pop sfo -config-check
+#   tunneltug vm up -config config/site.sandbox.example.yaml -pop sfo
+#   tunneltug -config config/site.sandbox.example.yaml -pop sfo -mode stack -token "$TOKEN"
+#
+# Command-line flags win over this file. Secrets stay in token_env.
+
+apiVersion: tunneltug/v1
+kind: Site
+
+site:
+  name: sandbox
+  domain: example.com
+  public_scheme: https
+  token_env: TUNNELTUG_TOKEN
+
+hub:
+  host: hub.tunneltug.com
+  tag: latest
+
+sandboxes:
+  - name: sandbox
+    pop: sfo
+    cpus: 8
+    memory_mb: 12288
+    data_gb: 256
+    kube_port: 16443
+    shares:
+      - name: work
+        host: C:\src\share
+        mount: /mnt/work
+
+stack:
+  namespace: 0trust-stack
+  host_ports: products
+  barges:
+    - name: ultimate_db
+      file: barges/ultimate_db.example.yaml
+    - name: ultimate_keystore
+      file: barges/ultimate_keystore.example.yaml
+    - name: williwaw
+      file: barges/williwaw.example.yaml
+
+pops:
+  - id: sfo
+    region: us-west
+    roles: [stack, kernel]
+    domain: sfo.example.com
+    tunnel:
+      public: "443"
+      control: "9000"
+      prod: true
+      barge:
+        replicas: 1
+        runtime: k3s
+        fleet_id: sfo
+    kernel:
+      ultimate_db:
+        node_id: udb-sfo
+        url: https://kernel-db.sfo.example.com:8480
+      ultimate_keystore:
+        node_id: uks-sfo
+        url: https://kernel-ks.sfo.example.com:8481

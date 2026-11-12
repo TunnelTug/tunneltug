@@ -34,6 +34,8 @@ curl -sS -m 120 --resolve example.com:443:127.0.0.1 https://example.com/
 
 | Log | Meaning | Action |
 |-----|---------|--------|
+| `Unauthorized client attempt from …` (edge) + client `yamux: Application error 0x1` / `wrong -token` | Client token ≠ that process’s `-token` | Use the token for **that** control port (e.g. `tunneltug-direct-phisheries.env` for `:9011`). Hub / barge / web tokens are different. |
+| Client `Connected!` then instant `Application error 0x0` + reconnect storm | Old client: no auth ACK; server closed (usually bad token) | Stop the loop; fix `-token`; upgrade client for backoff + 0x1 reason |
 | `host "x" not configured in HostWhitelist` | Missing `-subalt` / vhosts / domain | Add to TunnelTug config; restart once |
 | `rateLimited: too many failed authorizations` | 5 fails/hour | Stop probes; wait `retry after`; fix validation |
 | `unable to satisfy … no viable challenge type` | Authz dead/invalid | Fix :80/DNS/dual ACME; wait; one retry |

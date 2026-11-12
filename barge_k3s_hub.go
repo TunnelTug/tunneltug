@@ -16,7 +16,7 @@ import (
 // It is not a product next to MeshMail/Platform — it is how TunnelTug operates k3s.
 //
 // When -mode barge -barge-runtime k3s runs:
-//  1. OCI registry (hub) starts (public pull, auth push → 0trust.social S3)
+//  1. OCI registry (hub) starts (public pull, auth push; disk, S3, or several registries)
 //  2. Local k3s pulls the *engine* image (tunneltug binary) via k3s ctr
 //  3. StatefulSet is reconciled so each pod runs that engine image
 
@@ -38,11 +38,7 @@ func startK3sBargeHub(ctx context.Context, token string) (*hubServer, error) {
 	if cfg.Token == "" {
 		return nil, fmt.Errorf("k3s barge hub requires cryptographic token")
 	}
-	if _, err := startHubHTTPServer(ctx, cfg); err != nil {
-		return nil, err
-	}
-	// Lightweight handle for status logging (HTTP server owns the live store).
-	return newHubServer(cfg), nil
+	return startHubHTTPServer(ctx, cfg)
 }
 
 // ensureK3sBargeImage pulls image into the local k3s/containerd store so pods can start

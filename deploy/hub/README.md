@@ -18,7 +18,7 @@ tunneltug -mode barge -barge-runtime k3s
 | **Who runs hub** | Same process as the k3s fleet controller (`-k3s-hub`, default **on**) |
 | **Pull** | Public; controller `k3s ctr images pull` of the **engine** image |
 | **Push** | Authenticated; products + engine via `-mode hub-publish` |
-| **Storage** | 0trust.social S3 |
+| **Storage** | Directory (`-hub-dir`), 0trust.social S3, or several registries (`-hub-registries`) |
 | **Engine image** | `hub.tunneltug.com/tunneltug/engine:latest` (tunneltug binary in each pod) |
 | **SDF manifest** | Binds **fleet shape + image digest**; verify detects altered/retagged images |
 
@@ -61,6 +61,8 @@ tunneltug -mode barge -barge-runtime k3s \
 | `-hub-public` | `https://hub.tunneltug.com` | Advertised registry URL |
 | `-hub-s3-url` | `https://0trust.social` | Blob CDN |
 | `-hub-bucket` | `tunneltug-hub` | S3 bucket |
+| `-hub-dir` | — | Filesystem root for the default registry |
+| `-hub-registries` | — | YAML of additional registries (see `config/hub-registries.example.yaml`) |
 
 ## Multi-product publish
 

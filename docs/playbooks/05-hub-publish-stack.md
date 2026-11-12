@@ -19,10 +19,29 @@ tunneltug \
 | Flag | Role |
 |------|------|
 | `-hub-memory` | In-memory store (tests only) |
-| Pull | Public |
-| Push | Authenticated with token |
+| `-hub-dir` | Filesystem root for the default registry |
+| `-hub-registries` | YAML of more registries on this process |
+| Pull | Public on the default registry (`pull: auth` per registry) |
+| Push | Authenticated with that registry's token |
 
 Also embedded when `-mode barge -barge-runtime k3s` with `-k3s-hub` (default).
+
+## Self-hosted registries
+
+`-hub-dir` stores the default registry on disk. `-hub-registries` adds more registries to the same process. Each entry has its own host, storage (`dir`, `s3`, or `memory`), and push token. The request `Host` header selects the registry. Any other host uses the default registry.
+
+A registry may set `upstream` to pull through another OCI registry and cache the image locally. The client's token stays on this hub. `upstream_token_env` is the bearer sent upstream. Publish with hub-publish into a TunnelTug registry.
+
+```bash
+tunneltug -mode hub \
+  -hub-listen :5000 \
+  -hub-public https://hub.example.com \
+  -hub-dir /var/lib/tunneltug/hub/default \
+  -hub-registries config/hub-registries.example.yaml \
+  -token "$TOKEN"
+```
+
+Point each registry host at this listener (a TunnelTug vhost or split DNS). containerd and k3s pull `host/repo:tag` from the registry whose `host` matches. An empty `token` / `token_env` inherits `-token`. A registry named `default` replaces the flag-built registry and remains the catch-all host.
 
 ## Hub-publish (`-mode hub-publish`)
 

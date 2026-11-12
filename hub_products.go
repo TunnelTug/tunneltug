@@ -43,6 +43,7 @@ func init() {
 	alias(hubProd("services", "0trust/services"), "services")
 	alias(hubProd("social", "0trust/social"), "social", "cdn")
 	alias(hubProd("ack", "0trust/ack"), "ack", "defcon")
+	alias(hubProd("bandy", "0trust/bandy"), "bandy")
 	alias(hubProd("motionkb", "0trust/motionkb"), "motionkb", "motion")
 	alias(hubProd("williwaw", "0trust/williwaw"), "williwaw")
 	// TodoTraq (Work) — hybrid delivery + CRM; brand face todotraq.com
@@ -85,7 +86,7 @@ func init() {
 
 func listHubProductNames() []string {
 	return []string{
-		"mail", "search", "platform", "services", "social", "ack", "motionkb", "williwaw", "work", "gitmesh", "drive",
+		"mail", "search", "platform", "services", "social", "ack", "bandy", "motionkb", "williwaw", "work", "gitmesh", "drive",
 		"name", "dbsc_relay", "anycast", "orchid_ingest",
 		"auth", "iam", "access", "scim", "pki", "workflows", "topology", "nameservice", "servicekeys", "vpi", "logs",
 		"ultimate_db", "ultimate_keystore",
@@ -96,7 +97,8 @@ func listHubProductNames() []string {
 // HubProductCatalogPublic is a UI-friendly list for tunneltug.com hub page.
 func HubProductCatalogPublic() []map[string]string {
 	return []map[string]string{
-		{"name": "ack", "display": "Ack", "repo": "0trust/ack", "desc": "Event and community chat"},
+		{"name": "ack", "display": "Ack", "repo": "0trust/ack", "desc": "Event and community chat — brand face defcon.chat"},
+		{"name": "bandy", "display": "Bandy", "repo": "0trust/bandy", "desc": "General discussion chat — brand face bandy.chat"},
 		{"name": "williwaw", "display": "Williwaw", "repo": "0trust/williwaw", "desc": "Social feed and stories"},
 		{"name": "motionkb", "display": "MotionKB", "repo": "0trust/motionkb", "desc": "Docs and published sites"},
 		{"name": "work", "display": "TodoTraq", "repo": "0trust/work", "desc": "Hybrid delivery boards + CRM — brand face todotraq.com"},

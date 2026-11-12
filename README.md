@@ -472,6 +472,8 @@ Optional `auth_proxy: true` proxies `/auth/*`, `/samln/*`, and related IdP paths
 | `-hub-public` | `https://hub.tunneltug.com` | Public registry URL |
 | `-hub-s3-url` | `https://0trust.social` | S3 CDN for blobs |
 | `-hub-bucket` | `tunneltug-hub` | S3 bucket |
+| `-hub-dir` | — | Filesystem root for the default registry |
+| `-hub-registries` | — | YAML of additional OCI registries |
 | `-k3s-kubeconfig` | — | Kubeconfig (else in-cluster / `~/.kube/config`) |
 | `-k3s-namespace` | `tunneltug` | Workload namespace |
 | `-k3s-host-network` | `true` | hostNetwork for QUIC (recommended) |
@@ -512,6 +514,8 @@ Optional `auth_proxy: true` proxies `/auth/*`, `/samln/*`, and related IdP paths
 | `TUNNELTUG_HUB_PUBLIC` | `-hub-public` |
 | `TUNNELTUG_HUB_S3_URL` | `-hub-s3-url` |
 | `TUNNELTUG_HUB_BUCKET` | `-hub-bucket` |
+| `TUNNELTUG_HUB_DIR` | `-hub-dir` |
+| `TUNNELTUG_HUB_REGISTRIES` | `-hub-registries` |
 | `TUNNELTUG_DOMAIN` | `-domain` |
 | `TUNNELTUG_SERVER` | `-server` |
 | `TUNNELTUG_SUBDOMAIN` | `-subdomain` |
@@ -540,6 +544,15 @@ Optional `auth_proxy: true` proxies `/auth/*`, `/samln/*`, and related IdP paths
 See **[docs/ARCHITECTURES.md](docs/ARCHITECTURES.md)** for deployment shapes (dev tunnel → multi-PoP anycast + kernel mesh) and resilient combos (R1–R5).
 
 On **[hub.tunneltug.com](https://hub.tunneltug.com)** each catalog image has a **Configure** modal: pick an architecture, scale replicas, link other services (or multiple instances of the same), preview **YAML** and **Tugconf**, then **Scale & link** / copy / download. Catalog JSON: `GET /_tunneltug/hub/catalog`.
+
+Each product card also has **Review SBOM** — a CycloneDX 1.5 software bill of materials generated on `hub-publish` from the product binary (Go buildinfo modules + SHA-256). Public endpoints:
+
+| Path | Purpose |
+|------|---------|
+| `GET /_tunneltug/hub/sbom/<repo>?tag=latest` | Raw CycloneDX JSON |
+| `GET /_tunneltug/hub/sbom/<repo>/view?tag=latest` | HTML reviewer |
+| `GET /_tunneltug/hub/sboms` | Catalog of published SBOMs |
+| `PUT /_tunneltug/hub/sbom/<repo>?tag=…` | Authenticated store (hub-publish) |
 
 ## Site config & Tugconf (complex multi-PoP)
 
@@ -630,6 +643,9 @@ export TUNNELTUG_TOKEN=… HUB_TAG=dev TUNNELTUG_ROOT=~/tunneltug
 ./bin/tunneltug -mode hub-publish \
   -hub-products mail,search,platform,services,social,tunneltug \
   -hub-tag dev -token "$TUNNELTUG_TOKEN"
+# After each image push, SBOM is published automatically when a local binary is found
+# under -hub-dist (or default 0TrustCloud/deploy/oci/dist). Review on hub:
+#   https://hub.tunneltug.com/_tunneltug/hub/sbom/0trust/bandy/view?tag=latest
 
 # Product apps (Williwaw, MotionKB, …) — self-contained k3s, no kubectl
 ./bin/tunneltug -mode stack \

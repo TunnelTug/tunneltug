@@ -2,43 +2,55 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"net/url"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
-// Hub is an OCI Distribution-ish registry for TunnelTug barge (k3s) images.
-// Pull is public; push requires a cryptographic tunnel token.
-// Blobs and manifests are stored on the 0trust.social S3-compatible CDN (or local memory for tests).
+// Hub is an OCI registry for TunnelTug images (engine and products).
+// Pull is public on the default registry; push requires a cryptographic token.
+// One process can serve several registries. The Host header selects the
+// registry. Storage is a directory (-hub-dir), the 0trust.social S3 CDN, or
+// memory for tests. A registry may pull through an upstream on a local miss.
 
 type hubConfig struct {
-	Listen  string
-	Public  string // advertised registry URL, e.g. https://hub.tunneltug.com
-	S3URL   string
-	Bucket  string
-	Token   string
+	Listen string
+	Public string // advertised registry URL, e.g. https://hub.tunneltug.com
+	S3URL  string
+	Bucket string
+	Token  string
+	// Dir is the filesystem root for the default registry. Empty keeps S3.
+	Dir string
+	// Registries is a YAML file of additional registries (or a replacement default).
+	Registries string
 	// When true, use in-memory store (tests / dry-run without S3).
 	Memory bool
 }
 
 type hubServer struct {
-	cfg    hubConfig
-	store  hubBlobStore
-	mu     sync.Mutex
-	upload map[string]*hubUpload
+	cfg        hubConfig
+	store      hubBlobStore // default registry store (SBOM and legacy callers)
+	def        *hubRegistry
+	registries []*hubRegistry
+	byHost     map[string]*hubRegistry
+	mu         sync.Mutex
+	upload     map[string]*hubUpload
 }
 
 type hubUpload struct {
 	ID       string
 	Name     string
+	Registry string
 	Data     []byte
 	Created  time.Time
 }
@@ -60,12 +72,14 @@ const defaultK3sBargeImage = defaultK3sEngineImage
 
 func hubConfigFromFlags() hubConfig {
 	cfg := hubConfig{
-		Listen: strings.TrimSpace(*hubListen),
-		Public: strings.TrimRight(strings.TrimSpace(*hubPublic), "/"),
-		S3URL:  strings.TrimRight(strings.TrimSpace(*hubS3URL), "/"),
-		Bucket: strings.TrimSpace(*hubBucket),
-		Token:  strings.TrimSpace(*authToken),
-		Memory: *hubMemory,
+		Listen:     strings.TrimSpace(*hubListen),
+		Public:     strings.TrimRight(strings.TrimSpace(*hubPublic), "/"),
+		S3URL:      strings.TrimRight(strings.TrimSpace(*hubS3URL), "/"),
+		Bucket:     strings.TrimSpace(*hubBucket),
+		Token:      strings.TrimSpace(*authToken),
+		Dir:        strings.TrimSpace(*hubDir),
+		Registries: strings.TrimSpace(*hubRegistries),
+		Memory:     *hubMemory,
 	}
 	if cfg.Listen == "" {
 		cfg.Listen = ":5000"
@@ -82,18 +96,19 @@ func hubConfigFromFlags() hubConfig {
 	return cfg
 }
 
-func newHubServer(cfg hubConfig) *hubServer {
-	var store hubBlobStore
-	if cfg.Memory {
-		store = newMemoryHubStore()
-	} else {
-		store = newS3HubStore(cfg.S3URL, cfg.Bucket, cfg.Token)
+func newHubServer(cfg hubConfig) (*hubServer, error) {
+	def, list, byHost, err := buildHubRegistries(cfg)
+	if err != nil {
+		return nil, err
 	}
 	return &hubServer{
-		cfg:    cfg,
-		store:  store,
-		upload: make(map[string]*hubUpload),
-	}
+		cfg:        cfg,
+		store:      def.Store,
+		def:        def,
+		registries: list,
+		byHost:     byHost,
+		upload:     make(map[string]*hubUpload),
+	}, nil
 }
 
 func (h *hubServer) handler() http.Handler {
@@ -102,25 +117,44 @@ func (h *hubServer) handler() http.Handler {
 	mux.HandleFunc("/v2", h.handleV2Root)
 	mux.HandleFunc("/_tunneltug/hub/health", h.handleHealth)
 	mux.HandleFunc("/_tunneltug/hub/catalog", h.handleCatalogAPI)
+	// SBOM: public review + authenticated publish (hub-publish).
+	mux.HandleFunc("/_tunneltug/hub/sbom/", h.handleSBOM)
+	mux.HandleFunc("/_tunneltug/hub/sboms", h.handleSBOMCatalog)
 	mux.HandleFunc("/", h.handleIndex)
 	return h.withCORS(mux)
 }
 
 func (h *hubServer) handleHealth(w http.ResponseWriter, r *http.Request) {
+	reg := h.registryFor(r)
+	storage := "s3"
+	pull := "public"
+	if reg != nil {
+		if reg.Storage != "" {
+			storage = reg.Storage
+		}
+		if reg.PullAuth {
+			pull = "auth"
+		}
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
-		"status":  "ok",
-		"layer":   "k3s-barge",
-		"public":  h.cfg.Public,
-		"s3":      h.cfg.S3URL,
-		"bucket":  h.cfg.Bucket,
-		"pull":    "public",
-		"push":    "authenticated",
-		"memory":  h.cfg.Memory,
-		"image":   defaultK3sBargeImage,
-		"license": "MIT",
-		"spdx":    "MIT",
-		"license_url": "https://github.com/TunnelTug/tunneltug/blob/main/LICENSE",
+		"status":       "ok",
+		"layer":        "k3s-barge",
+		"public":       h.cfg.Public,
+		"s3":           h.cfg.S3URL,
+		"bucket":       h.cfg.Bucket,
+		"storage":      storage,
+		"pull":         pull,
+		"push":         "authenticated",
+		"memory":       storage == "memory",
+		"registries":   h.registryPublicList(),
+		"image":        defaultK3sBargeImage,
+		"license":      "MIT",
+		"spdx":         "MIT",
+		"license_url":  "https://github.com/TunnelTug/tunneltug/blob/main/LICENSE",
+		"sbom":         true,
+		"sbom_catalog": "/_tunneltug/hub/sboms",
+		"sbom_format":  "CycloneDX-1.5",
 	})
 }
 
@@ -128,15 +162,16 @@ func (h *hubServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 // startHubHTTPServer runs the OCI registry. Used by the k3s barge layer (primary)
 // and by -mode hub (standalone face only).
-func startHubHTTPServer(ctx context.Context, cfg hubConfig) (*http.Server, error) {
+func startHubHTTPServer(ctx context.Context, cfg hubConfig) (*hubServer, error) {
 	if strings.TrimSpace(cfg.Token) == "" {
 		return nil, fmt.Errorf("hub requires a cryptographic token")
 	}
-	h := newHubServer(cfg)
-	if cfg.Memory {
-		log.Printf("k3s barge hub storage: in-memory (dev)")
-	} else {
-		log.Printf("k3s barge hub storage: S3 CDN %s/s3/%s", cfg.S3URL, cfg.Bucket)
+	h, err := newHubServer(cfg)
+	if err != nil {
+		return nil, err
+	}
+	for _, reg := range h.registries {
+		log.Printf("hub registry %s storage=%s host=%s public=%s upstream=%s", reg.Name, reg.Storage, reg.Host, reg.Public, reg.Upstream)
 	}
 	srv := &http.Server{
 		Addr:              cfg.Listen,
@@ -153,12 +188,12 @@ func startHubHTTPServer(ctx context.Context, cfg hubConfig) (*http.Server, error
 		_ = srv.Shutdown(shutdownCtx)
 	}()
 	go func() {
-		log.Printf("k3s barge image hub listening on %s (public %s)", cfg.Listen, cfg.Public)
+		log.Printf("k3s barge image hub listening on %s (public %s, %d registries)", cfg.Listen, cfg.Public, len(h.registries))
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Printf("k3s barge hub stopped: %v", err)
 		}
 	}()
-	return srv, nil
+	return h, nil
 }
 
 // runHub is a thin standalone entrypoint; production embeds the hub in barge k3s.
@@ -264,17 +299,21 @@ routed:
 
 func (h *hubServer) handleManifest(w http.ResponseWriter, r *http.Request, name, ref string) {
 	ref = strings.TrimSpace(ref)
-	if ref == "" {
+	if ref == "" || !validManifestRef(ref) {
 		hubError(w, http.StatusBadRequest, "MANIFEST_INVALID", "reference required")
 		return
 	}
+	reg := h.registryFor(r)
 	key := hubManifestKey(name, ref)
 
 	switch r.Method {
 	case http.MethodGet, http.MethodHead:
-		data, ct, err := h.store.Get(key)
+		if !h.allowPull(w, r) {
+			return
+		}
+		data, ct, err := h.readManifest(r, name, ref)
 		if err != nil {
-			hubError(w, http.StatusNotFound, "MANIFEST_UNKNOWN", "manifest unknown")
+			writeHubMiss(w, err, "MANIFEST_UNKNOWN", "manifest unknown")
 			return
 		}
 		if ct == "" {
@@ -282,8 +321,7 @@ func (h *hubServer) handleManifest(w http.ResponseWriter, r *http.Request, name,
 		}
 		w.Header().Set("Content-Type", ct)
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(data)))
-		sum := sha256.Sum256(data)
-		w.Header().Set("Docker-Content-Digest", "sha256:"+hex.EncodeToString(sum[:]))
+		w.Header().Set("Docker-Content-Digest", sha256Sum(data))
 		if r.Method == http.MethodHead {
 			w.WriteHeader(http.StatusOK)
 			return
@@ -308,17 +346,15 @@ func (h *hubServer) handleManifest(w http.ResponseWriter, r *http.Request, name,
 		if ct == "" {
 			ct = "application/vnd.docker.distribution.manifest.v2+json"
 		}
-		if err := h.store.Put(key, data, ct); err != nil {
+		if err := reg.Store.Put(key, data, ct); err != nil {
 			log.Printf("hub manifest put: %v", err)
 			hubError(w, http.StatusBadGateway, "DENIED", "storage error")
 			return
 		}
 		// Also index by digest for immutable pulls.
-		sum := sha256.Sum256(data)
-		digest := "sha256:" + hex.EncodeToString(sum[:])
-		_ = h.store.Put(hubManifestKey(name, digest), data, ct)
-		// Tag index for tags/list
-		_ = h.indexTag(name, ref)
+		digest := sha256Sum(data)
+		_ = reg.Store.Put(hubManifestKey(name, digest), data, ct)
+		_ = h.indexTag(reg.Store, name, ref)
 
 		w.Header().Set("Location", fmt.Sprintf("/v2/%s/manifests/%s", name, ref))
 		w.Header().Set("Docker-Content-Digest", digest)
@@ -342,28 +378,28 @@ func (h *hubServer) handleBlob(w http.ResponseWriter, r *http.Request, name, dig
 		hubError(w, http.StatusBadRequest, "DIGEST_INVALID", "invalid digest")
 		return
 	}
-	key := hubBlobKey(digest)
-
 	switch r.Method {
 	case http.MethodGet, http.MethodHead:
-		if r.Method == http.MethodHead {
-			size, ct, err := h.store.Head(key)
-			if err != nil {
-				hubError(w, http.StatusNotFound, "BLOB_UNKNOWN", "blob unknown")
-				return
-			}
-			if ct == "" {
-				ct = "application/octet-stream"
-			}
-			w.Header().Set("Content-Type", ct)
-			w.Header().Set("Content-Length", fmt.Sprintf("%d", size))
-			w.Header().Set("Docker-Content-Digest", digest)
-			w.WriteHeader(http.StatusOK)
+		if !h.allowPull(w, r) {
 			return
 		}
-		data, ct, err := h.store.Get(key)
+		reg := h.registryFor(r)
+		if r.Method == http.MethodHead {
+			size, ct, err := reg.Store.Head(hubBlobKey(digest))
+			if err == nil {
+				if ct == "" {
+					ct = "application/octet-stream"
+				}
+				w.Header().Set("Content-Type", ct)
+				w.Header().Set("Content-Length", fmt.Sprintf("%d", size))
+				w.Header().Set("Docker-Content-Digest", digest)
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+		}
+		data, ct, err := h.readBlob(r, name, digest)
 		if err != nil {
-			hubError(w, http.StatusNotFound, "BLOB_UNKNOWN", "blob unknown")
+			writeHubMiss(w, err, "BLOB_UNKNOWN", "blob unknown")
 			return
 		}
 		if ct == "" {
@@ -372,6 +408,10 @@ func (h *hubServer) handleBlob(w http.ResponseWriter, r *http.Request, name, dig
 		w.Header().Set("Content-Type", ct)
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(data)))
 		w.Header().Set("Docker-Content-Digest", digest)
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(data)
 
@@ -384,10 +424,10 @@ func (h *hubServer) handleBlobUpload(w http.ResponseWriter, r *http.Request, nam
 	// rest is "uploads" or "uploads/<uuid>"
 	rest = strings.TrimPrefix(rest, "uploads")
 	rest = strings.TrimPrefix(rest, "/")
+	reg := h.registryFor(r)
 
 	switch r.Method {
 	case http.MethodPost:
-		// Start upload
 		if !h.requirePushAuth(w, r) {
 			return
 		}
@@ -398,7 +438,7 @@ func (h *hubServer) handleBlobUpload(w http.ResponseWriter, r *http.Request, nam
 				hubError(w, http.StatusBadRequest, "BLOB_UPLOAD_INVALID", "read failed")
 				return
 			}
-			if err := h.commitBlob(dig, data); err != nil {
+			if err := h.commitBlob(reg.Store, dig, data); err != nil {
 				hubError(w, http.StatusBadRequest, "DIGEST_INVALID", err.Error())
 				return
 			}
@@ -407,6 +447,19 @@ func (h *hubServer) handleBlobUpload(w http.ResponseWriter, r *http.Request, nam
 			w.WriteHeader(http.StatusCreated)
 			return
 		}
+		// Cross-repo mount: blob already in this registry.
+		if mount := strings.TrimSpace(r.URL.Query().Get("mount")); mount != "" {
+			if !validDigest(mount) {
+				hubError(w, http.StatusBadRequest, "DIGEST_INVALID", "invalid digest")
+				return
+			}
+			if _, _, err := reg.Store.Head(hubBlobKey(mount)); err == nil {
+				w.Header().Set("Location", fmt.Sprintf("/v2/%s/blobs/%s", name, mount))
+				w.Header().Set("Docker-Content-Digest", mount)
+				w.WriteHeader(http.StatusCreated)
+				return
+			}
+		}
 		id, err := GenerateSecureToken()
 		if err != nil {
 			hubError(w, http.StatusInternalServerError, "DENIED", "uuid failed")
@@ -414,7 +467,7 @@ func (h *hubServer) handleBlobUpload(w http.ResponseWriter, r *http.Request, nam
 		}
 		id = id[:32]
 		h.mu.Lock()
-		h.upload[id] = &hubUpload{ID: id, Name: name, Created: time.Now().UTC()}
+		h.upload[id] = &hubUpload{ID: id, Name: name, Registry: reg.Name, Created: time.Now().UTC()}
 		h.mu.Unlock()
 		loc := fmt.Sprintf("/v2/%s/blobs/uploads/%s", name, id)
 		w.Header().Set("Location", loc)
@@ -427,25 +480,28 @@ func (h *hubServer) handleBlobUpload(w http.ResponseWriter, r *http.Request, nam
 			return
 		}
 		id := rest
-		h.mu.Lock()
-		up, ok := h.upload[id]
-		h.mu.Unlock()
-		if !ok {
-			hubError(w, http.StatusNotFound, "BLOB_UPLOAD_UNKNOWN", "upload unknown")
-			return
-		}
 		chunk, err := io.ReadAll(io.LimitReader(r.Body, 512<<20))
 		if err != nil {
 			hubError(w, http.StatusBadRequest, "BLOB_UPLOAD_INVALID", "read failed")
 			return
 		}
 		h.mu.Lock()
+		up, ok := h.upload[id]
+		if !ok || up.Registry != reg.Name {
+			h.mu.Unlock()
+			hubError(w, http.StatusNotFound, "BLOB_UPLOAD_UNKNOWN", "upload unknown")
+			return
+		}
 		up.Data = append(up.Data, chunk...)
 		n := len(up.Data)
 		h.mu.Unlock()
 		w.Header().Set("Location", fmt.Sprintf("/v2/%s/blobs/uploads/%s", name, id))
 		w.Header().Set("Docker-Upload-UUID", id)
-		w.Header().Set("Range", fmt.Sprintf("0-%d", n-1))
+		if n == 0 {
+			w.Header().Set("Range", "0-0")
+		} else {
+			w.Header().Set("Range", fmt.Sprintf("0-%d", n-1))
+		}
 		w.WriteHeader(http.StatusAccepted)
 
 	case http.MethodPut:
@@ -460,8 +516,7 @@ func (h *hubServer) handleBlobUpload(w http.ResponseWriter, r *http.Request, nam
 		}
 		h.mu.Lock()
 		up, ok := h.upload[id]
-		if ok {
-			// Final chunk may be in body.
+		if ok && up.Registry == reg.Name {
 			if r.ContentLength != 0 {
 				chunk, _ := io.ReadAll(io.LimitReader(r.Body, 512<<20))
 				up.Data = append(up.Data, chunk...)
@@ -469,19 +524,22 @@ func (h *hubServer) handleBlobUpload(w http.ResponseWriter, r *http.Request, nam
 			data := up.Data
 			delete(h.upload, id)
 			h.mu.Unlock()
-			if err := h.commitBlob(dig, data); err != nil {
+			if err := h.commitBlob(reg.Store, dig, data); err != nil {
 				hubError(w, http.StatusBadRequest, "DIGEST_INVALID", err.Error())
 				return
 			}
 		} else {
 			h.mu.Unlock()
-			// Complete with body only
+			if ok {
+				hubError(w, http.StatusNotFound, "BLOB_UPLOAD_UNKNOWN", "upload unknown")
+				return
+			}
 			data, err := io.ReadAll(io.LimitReader(r.Body, 512<<20))
 			if err != nil {
 				hubError(w, http.StatusBadRequest, "BLOB_UPLOAD_INVALID", "read failed")
 				return
 			}
-			if err := h.commitBlob(dig, data); err != nil {
+			if err := h.commitBlob(reg.Store, dig, data); err != nil {
 				hubError(w, http.StatusBadRequest, "DIGEST_INVALID", err.Error())
 				return
 			}
@@ -491,16 +549,24 @@ func (h *hubServer) handleBlobUpload(w http.ResponseWriter, r *http.Request, nam
 		w.WriteHeader(http.StatusCreated)
 
 	case http.MethodGet:
-		// Upload status
+		if !h.requirePushAuth(w, r) {
+			return
+		}
 		id := rest
 		h.mu.Lock()
 		up, ok := h.upload[id]
+		if ok && up.Registry != reg.Name {
+			ok = false
+		}
+		var n int
+		if ok {
+			n = len(up.Data)
+		}
 		h.mu.Unlock()
 		if !ok {
 			hubError(w, http.StatusNotFound, "BLOB_UPLOAD_UNKNOWN", "upload unknown")
 			return
 		}
-		n := len(up.Data)
 		w.Header().Set("Docker-Upload-UUID", id)
 		if n == 0 {
 			w.Header().Set("Range", "0-0")
@@ -514,16 +580,27 @@ func (h *hubServer) handleBlobUpload(w http.ResponseWriter, r *http.Request, nam
 	}
 }
 
-func (h *hubServer) commitBlob(digest string, data []byte) error {
+func (h *hubServer) commitBlob(store hubBlobStore, digest string, data []byte) error {
+	if store == nil {
+		return fmt.Errorf("no registry store")
+	}
 	if !validDigest(digest) {
 		return fmt.Errorf("invalid digest")
 	}
-	sum := sha256.Sum256(data)
-	got := "sha256:" + hex.EncodeToString(sum[:])
+	got := sha256Sum(data)
 	if !strings.EqualFold(got, digest) {
 		return fmt.Errorf("digest mismatch")
 	}
-	return h.store.Put(hubBlobKey(digest), data, "application/octet-stream")
+	return store.Put(hubBlobKey(digest), data, "application/octet-stream")
+}
+
+func writeHubMiss(w http.ResponseWriter, err error, code, msg string) {
+	var fetch *hubFetchError
+	if errors.As(err, &fetch) && fetch.Status != http.StatusNotFound {
+		hubError(w, http.StatusBadGateway, "DENIED", "upstream registry error")
+		return
+	}
+	hubError(w, http.StatusNotFound, code, msg)
 }
 
 // handleOCICatalog implements GET /v2/_catalog for registry clients.
@@ -532,72 +609,77 @@ func (h *hubServer) handleOCICatalog(w http.ResponseWriter, r *http.Request) {
 		hubError(w, http.StatusMethodNotAllowed, "UNSUPPORTED", "method not allowed")
 		return
 	}
-	// Prefer indexed repos under manifests/ if store can list.
-	keys, err := h.store.ListPrefix("manifests/")
-	repos := map[string]struct{}{}
+	if !h.allowPull(w, r) {
+		return
+	}
+	reg := h.registryFor(r)
+	keys, err := reg.Store.ListPrefix("manifests/")
+	var list []string
 	if err == nil {
-		for _, k := range keys {
-			// manifests/{name}/...
-			rest := strings.TrimPrefix(k, "manifests/")
-			// name may contain slashes (0trust/platform); take first two segments when present
-			parts := strings.Split(rest, "/")
-			if len(parts) >= 2 && (parts[0] == "0trust" || parts[0] == "tunneltug") {
-				repos[parts[0]+"/"+parts[1]] = struct{}{}
-			} else if len(parts) >= 1 && parts[0] != "" {
-				// single-segment repo names
-				if len(parts) == 1 || parts[1] == "" {
-					continue
+		list = reposFromManifestKeys(keys)
+	}
+	// The default registry keeps the static product catalog so the hub UI
+	// has a stable list when the blob store is empty.
+	if reg.InjectCatalog {
+		seen := map[string]struct{}{}
+		for _, name := range list {
+			seen[name] = struct{}{}
+		}
+		for _, p := range HubProductCatalogPublic() {
+			if repo, ok := p["repo"]; ok && repo != "" {
+				if _, exists := seen[repo]; !exists {
+					list = append(list, repo)
+					seen[repo] = struct{}{}
 				}
 			}
 		}
+		sort.Strings(list)
 	}
-	// Always include static product catalog repos so the hub UI/config builder
-	// has a stable list even when the blob store is empty or list fails.
-	for _, p := range HubProductCatalogPublic() {
-		if repo, ok := p["repo"]; ok && repo != "" {
-			repos[repo] = struct{}{}
+	n := 0
+	if raw := strings.TrimSpace(r.URL.Query().Get("n")); raw != "" {
+		if v, err := strconv.Atoi(raw); err == nil && v > 0 {
+			n = v
 		}
 	}
-	list := make([]string, 0, len(repos))
-	for r := range repos {
-		list = append(list, r)
-	}
-	// stable order
-	for i := 0; i < len(list); i++ {
-		for j := i + 1; j < len(list); j++ {
-			if list[j] < list[i] {
-				list[i], list[j] = list[j], list[i]
-			}
-		}
+	page, next := pageStrings(list, n, r.URL.Query().Get("last"))
+	if next != "" {
+		w.Header().Set("Link", fmt.Sprintf(`</v2/_catalog?n=%d&last=%s>; rel="next"`, n, url.QueryEscape(next)))
 	}
 	w.Header().Set("Content-Type", "application/json")
 	if r.Method == http.MethodHead {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{"repositories": list})
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{"repositories": page})
 }
 
 func (h *hubServer) handleTagsList(w http.ResponseWriter, r *http.Request, name string) {
-	if r.Method != http.MethodGet {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	tags := h.listTags(name)
+	if !h.allowPull(w, r) {
+		return
+	}
+	tags := h.listTags(h.registryFor(r), name)
 	w.Header().Set("Content-Type", "application/json")
+	if r.Method == http.MethodHead {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"name": name,
 		"tags": tags,
 	})
 }
 
-func (h *hubServer) indexTag(name, ref string) error {
-	if strings.HasPrefix(ref, "sha256:") {
+func (h *hubServer) indexTag(store hubBlobStore, name, ref string) error {
+	if store == nil || strings.HasPrefix(ref, "sha256:") {
 		return nil
 	}
 	key := hubTagsKey(name)
 	var tags []string
-	if data, _, err := h.store.Get(key); err == nil && len(data) > 0 {
+	if data, _, err := store.Get(key); err == nil && len(data) > 0 {
 		_ = json.Unmarshal(data, &tags)
 	}
 	found := false
@@ -611,33 +693,60 @@ func (h *hubServer) indexTag(name, ref string) error {
 		tags = append(tags, ref)
 	}
 	raw, _ := json.Marshal(tags)
-	return h.store.Put(key, raw, "application/json")
+	return store.Put(key, raw, "application/json")
 }
 
-func (h *hubServer) listTags(name string) []string {
-	key := hubTagsKey(name)
-	data, _, err := h.store.Get(key)
-	if err != nil || len(data) == 0 {
+func (h *hubServer) listTags(reg *hubRegistry, name string) []string {
+	if reg == nil || reg.Store == nil {
 		return []string{}
 	}
 	var tags []string
-	if json.Unmarshal(data, &tags) != nil {
-		return []string{}
+	if data, _, err := reg.Store.Get(hubTagsKey(name)); err == nil && len(data) > 0 {
+		_ = json.Unmarshal(data, &tags)
 	}
-	return tags
+	if reg.Upstream == "" {
+		if tags == nil {
+			return []string{}
+		}
+		return tags
+	}
+	remote, err := h.upstreamTags(reg, name)
+	if err != nil {
+		if tags == nil {
+			return []string{}
+		}
+		return tags
+	}
+	return unionStrings(tags, remote)
 }
 
-// requirePushAuth enforces authenticated write. Pull paths never call this.
+// requirePushAuth enforces authenticated write for the registry selected by Host.
 // Accepts: Authorization Bearer <token> or Basic (any user, password=token).
 func (h *hubServer) requirePushAuth(w http.ResponseWriter, r *http.Request) bool {
+	reg := h.registryFor(r)
 	expected := strings.TrimSpace(h.cfg.Token)
+	service := "hub.tunneltug.com"
+	if reg != nil {
+		if strings.TrimSpace(reg.Token) != "" {
+			expected = reg.Token
+		}
+		service = reg.authService()
+	}
+	return h.requireToken(w, r, expected, service)
+}
+
+func (h *hubServer) requireToken(w http.ResponseWriter, r *http.Request, expected, service string) bool {
+	expected = strings.TrimSpace(expected)
+	if service == "" {
+		service = "tunneltug-hub"
+	}
 	if expected == "" {
 		hubError(w, http.StatusUnauthorized, "UNAUTHORIZED", "hub push token not configured")
 		return false
 	}
 	auth := strings.TrimSpace(r.Header.Get("Authorization"))
 	if auth == "" {
-		w.Header().Set("WWW-Authenticate", `Bearer realm="tunneltug-hub",service="hub.tunneltug.com"`)
+		w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer realm="tunneltug-hub",service=%q`, service))
 		hubError(w, http.StatusUnauthorized, "UNAUTHORIZED", "authentication required")
 		return false
 	}
@@ -710,6 +819,26 @@ func validRepoName(name string) bool {
 			if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' {
 				continue
 			}
+			return false
+		}
+	}
+	return true
+}
+
+func validManifestRef(ref string) bool {
+	if ref == "" || len(ref) > 255 || strings.Contains(ref, "/") || strings.Contains(ref, "\\") || strings.Contains(ref, "..") {
+		return false
+	}
+	if validDigest(ref) {
+		return true
+	}
+	for i, c := range ref {
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '_':
+			continue
+		case (c == '.' || c == '-') && i > 0:
+			continue
+		default:
 			return false
 		}
 	}

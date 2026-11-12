@@ -76,8 +76,6 @@ func runClient() {
 			continue
 		}
 
-		log.Printf("Connected! Tunnel online. Public URL: %s", publicURL())
-
 		session, err := yamux.Server(conn, streamingYamuxConfig())
 		if err != nil {
 			log.Printf("Yamux error: %v", err)
@@ -90,15 +88,29 @@ func runClient() {
 		active.session = session
 		active.Unlock()
 
+		onlineAt := time.Now()
+		log.Printf("Control channel open. Public URL: %s", publicURL())
+
 		for ctx.Err() == nil {
 			stream, err := session.Accept()
 			if err != nil {
 				if ctx.Err() != nil {
 					break
 				}
-				log.Println("Server disconnected. Reconnecting...")
+				attempt++
+				delay := clientBackoff(attempt)
+				log.Printf("%s Retrying in %s...", tunnelCloseHint(err, time.Since(onlineAt)), delay)
+				_ = session.Close()
+				active.Lock()
+				active.conn = nil
+				active.session = nil
+				active.Unlock()
+				if !sleepOrDone(ctx, delay) {
+					return
+				}
 				break
 			}
+			attempt = 0
 			go proxyStreamToLocal(stream, localApp)
 		}
 
@@ -107,6 +119,24 @@ func runClient() {
 		active.session = nil
 		active.Unlock()
 		_ = session.Close()
+	}
+}
+
+func tunnelCloseHint(err error, alive time.Duration) string {
+	msg := ""
+	if err != nil {
+		msg = err.Error()
+	}
+	low := strings.ToLower(msg)
+	switch {
+	case strings.Contains(low, "unauthorized") || strings.Contains(low, "application error 0x1"):
+		return "Server rejected tunnel auth (wrong -token for this control port)."
+	case strings.Contains(low, "invalid control") || strings.Contains(low, "application error 0x2"):
+		return "Server rejected the control handshake."
+	case alive < 2*time.Second:
+		return fmt.Sprintf("Server closed immediately (%v). Wrong token, or another client took this tunnel key.", err)
+	default:
+		return "Server disconnected."
 	}
 }
 

@@ -42,6 +42,12 @@ func applyEnvDefaults() {
 	if v := strings.TrimSpace(os.Getenv("TUNNELTUG_HUB_BUCKET")); v != "" && strings.TrimSpace(*hubBucket) == "tunneltug-hub" {
 		*hubBucket = v
 	}
+	if v := strings.TrimSpace(os.Getenv("TUNNELTUG_HUB_DIR")); v != "" && strings.TrimSpace(*hubDir) == "" {
+		*hubDir = v
+	}
+	if v := strings.TrimSpace(os.Getenv("TUNNELTUG_HUB_REGISTRIES")); v != "" && strings.TrimSpace(*hubRegistries) == "" {
+		*hubRegistries = v
+	}
 	if envTruthy("TUNNELTUG_HUB_MEMORY") {
 		*hubMemory = true
 	}
@@ -254,8 +260,16 @@ func validateConfig() error {
 		if err := ensureAuthToken(); err != nil {
 			return err
 		}
-		if strings.TrimSpace(*hubBucket) == "" {
+		usingDir := strings.TrimSpace(*hubDir) != "" || *hubMemory
+		if !usingDir && strings.TrimSpace(*hubBucket) == "" {
 			return fmt.Errorf("-hub-bucket must not be empty")
+		}
+		if p := strings.TrimSpace(*hubRegistries); p != "" {
+			cfg := hubConfigFromFlags()
+			cfg.Token = strings.TrimSpace(*authToken)
+			if _, err := assembleRegistryConfigs(cfg); err != nil {
+				return err
+			}
 		}
 		return nil
 	}

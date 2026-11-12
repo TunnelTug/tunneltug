@@ -1,0 +1,36 @@
+# Extra OCI registries served by one TunnelTug hub process.
+# The Host header selects the registry. Any other host uses the default
+# registry from -hub-public / -hub-dir / -hub-s3-url / -hub-bucket.
+#
+# Name a registry "default" to replace that flag-built registry.
+# Relative dir paths are resolved next to this file.
+#
+# tunneltug -mode hub -hub-dir /var/lib/tunneltug/hub/default \
+#   -hub-registries config/hub-registries.example.yaml -token "$TOKEN"
+
+registries:
+  - name: products
+    host: hub.example.com
+    public: https://hub.example.com
+    storage: dir
+    dir: products
+    pull: public
+
+  - name: fleet
+    host: fleet.example.com
+    public: https://fleet.example.com
+    storage: dir
+    dir: fleet
+    pull: auth
+    token_env: TUNNELTUG_FLEET_HUB_TOKEN
+
+  # Pull-through cache. A local miss is fetched from upstream and stored here.
+  # The client's push token is not forwarded. Set upstream_token_env when the
+  # upstream registry requires a bearer token.
+  - name: mirror
+    host: mirror.example.com
+    public: https://mirror.example.com
+    storage: dir
+    dir: mirror
+    pull: public
+    upstream: https://hub.tunneltug.com

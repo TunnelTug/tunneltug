@@ -15,6 +15,9 @@ import (
 // Preferred path: local k3s/containerd image → k3s ctr push (barge layer).
 // Fallback: pack a linux binary from -hub-dist (or default dist paths) and push
 // over the hub Registry API. No external image tools required.
+//
+// After a successful image publish, TunnelTug generates a CycloneDX SBOM (when a
+// local product binary is available) and stores it on the hub for public review.
 func runHubPublish() {
 	if err := ensureAuthToken(); err != nil {
 		log.Fatalf("Configuration error: %v", err)
@@ -51,10 +54,13 @@ func runHubPublish() {
 		dest := hubImageRef(host, prod.HubRepo, tag)
 		log.Printf("hub-publish: %s → %s", local, dest)
 
+		published := false
+		var last error
 		if err := publishK3sBargeImage(ctx, local, dest, token); err == nil {
 			log.Printf("hub-publish: ok %s (k3s ctr)", dest)
-			continue
+			published = true
 		} else {
+			last = err
 			// Try alternate local k3s names.
 			alts := []string{
 				local,
@@ -62,8 +68,6 @@ func runHubPublish() {
 				hubImageRef(host, prod.HubRepo, tag),
 				"0trust/" + prod.Name + ":" + tag,
 			}
-			ok := false
-			var last error = err
 			seen := map[string]bool{}
 			for _, src := range alts {
 				if seen[src] {
@@ -74,13 +78,13 @@ func runHubPublish() {
 					last = err
 					continue
 				}
-				ok = true
+				published = true
 				log.Printf("hub-publish: ok %s (k3s from %s)", dest, src)
 				break
 			}
-			if ok {
-				continue
-			}
+		}
+
+		if !published {
 			// Built-in binary pack + Registry API push (TunnelTug hub, no crane/docker).
 			binPath, berr := resolveHubBinary(prod.Name)
 			if berr != nil {
@@ -95,7 +99,21 @@ func runHubPublish() {
 				continue
 			}
 			log.Printf("hub-publish: ok %s (binary pack)", dest)
+			published = true
 		}
+
+		// SBOM: best-effort from local product binary (same tree hub-dist uses).
+		if binPath, berr := resolveHubBinary(prod.Name); berr == nil {
+			if err := generateAndPublishSBOM(binPath, host, prod.HubRepo, tag, token); err != nil {
+				log.Printf("hub-publish: SBOM warn %s: %v", name, err)
+			} else {
+				log.Printf("hub-publish: SBOM ok %s (%s/_tunneltug/hub/sbom/%s/view?tag=%s)",
+					name, hubBaseURL(host), prod.HubRepo, tag)
+			}
+		} else {
+			log.Printf("hub-publish: SBOM skip %s: no local binary (%v)", name, berr)
+		}
+		_ = published
 	}
 
 	if len(failed) > 0 {

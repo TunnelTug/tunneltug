@@ -14,35 +14,57 @@ import (
 
 func (h *hubServer) handleCatalogAPI(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+	public := strings.TrimRight(h.cfg.Public, "/")
+	products := hubBuilderCatalog()
+	// Annotate each product with SBOM review URLs (filled after hub-publish).
+	type productWithSBOM struct {
+		hubBuilderProduct
+		SBOMURL  string `json:"sbom_url"`
+		SBOMView string `json:"sbom_view"`
+	}
+	enriched := make([]productWithSBOM, 0, len(products))
+	for _, p := range products {
+		enriched = append(enriched, productWithSBOM{
+			hubBuilderProduct: p,
+			SBOMURL:           public + "/_tunneltug/hub/sbom/" + p.Repo + "?tag=latest",
+			SBOMView:          public + "/_tunneltug/hub/sbom/" + p.Repo + "/view?tag=latest",
+		})
+	}
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"registry": h.cfg.Public,
-		"engine":   defaultK3sEngineImage,
-		"products": hubBuilderCatalog(),
+		"registry":      h.cfg.Public,
+		"registries":    h.registryPublicList(),
+		"engine":        defaultK3sEngineImage,
+		"products":      enriched,
 		"architectures": hubArchitecturesPublic(),
+		"sbom": map[string]string{
+			"format":  "CycloneDX-1.5",
+			"catalog": public + "/_tunneltug/hub/sboms",
+		},
 		"links": map[string]string{
-			"docs":          "https://github.com/TunnelTug/tunneltug/blob/main/docs/ARCHITECTURES.md",
-			"site_example":  "https://github.com/TunnelTug/tunneltug/blob/main/config/site.example.yaml",
-			"tug_example":   "https://github.com/TunnelTug/tunneltug/blob/main/config/site.example.tug",
+			"docs":         "https://github.com/TunnelTug/tunneltug/blob/main/docs/ARCHITECTURES.md",
+			"site_example": "https://github.com/TunnelTug/tunneltug/blob/main/config/site.example.yaml",
+			"tug_example":  "https://github.com/TunnelTug/tunneltug/blob/main/config/site.example.tug",
+			"sboms":        public + "/_tunneltug/hub/sboms",
 		},
 	})
 }
 
 // hubBuilderProduct is one catalog row for the hub UI builder.
 type hubBuilderProduct struct {
-	Name        string `json:"name"`
-	Display     string `json:"display"`
-	Repo        string `json:"repo"`
-	Desc        string `json:"desc"`
-	Port        int    `json:"port"`
-	Kind        string `json:"kind"` // app | platform | kernel | edge | engine
-	ZeroConfig  string `json:"zero_config_port"`
+	Name        string   `json:"name"`
+	Display     string   `json:"display"`
+	Repo        string   `json:"repo"`
+	Desc        string   `json:"desc"`
+	Port        int      `json:"port"`
+	Kind        string   `json:"kind"` // app | platform | kernel | edge | engine
+	ZeroConfig  string   `json:"zero_config_port"`
 	DefaultLink []string `json:"default_links,omitempty"`
 }
 
 func hubBuilderCatalog() []hubBuilderProduct {
 	// Ports align with stackCatalog zero-config defaults.
 	ports := map[string]int{
-		"williwaw": 3081, "motionkb": 8090, "ack": 3083, "mail": 3086, "search": 3087, "gitmesh": 3088, "drive": 3095,
+		"williwaw": 3081, "motionkb": 8090, "ack": 3083, "bandy": 3084, "mail": 3086, "search": 3087, "gitmesh": 3088, "drive": 3095,
 		"social": 3085, "platform": 8443, "services": 8080, "name": 8447, "dbsc_relay": 8450,
 		"anycast": 9099, "orchid_ingest": 8451, "auth": 8460, "iam": 8461, "access": 8462,
 		"scim": 8463, "pki": 8464, "workflows": 8465, "topology": 8466, "nameservice": 8467,
@@ -62,6 +84,7 @@ func hubBuilderCatalog() []hubBuilderProduct {
 		"williwaw": {"social", "ack", "ultimate_db", "ultimate_keystore"},
 		"motionkb": {"social", "williwaw", "ultimate_db"},
 		"ack":      {"social", "ultimate_db"},
+		"bandy":    {"social", "williwaw", "ultimate_db"},
 		"mail":     {"ultimate_db", "ultimate_keystore"},
 		"search":   {"ultimate_db"},
 		"gitmesh":  {"ultimate_db"},
@@ -156,10 +179,13 @@ h2{font-size:1.1rem;margin:0 0 12px;color:var(--accent);text-transform:uppercase
 .prod .repo{font-size:11px;color:var(--muted);font-family:ui-monospace,monospace;word-break:break-all}
 .prod p{margin:0;font-size:12px;color:var(--muted);flex:1}
 .prod .meta{font-size:11px;color:var(--accent)}
-.btn{appearance:none;border:1px solid var(--border);background:#1e293b;color:var(--text);border-radius:8px;padding:8px 12px;font-size:13px;font-weight:600;cursor:pointer}
-.btn:hover{border-color:var(--accent);color:var(--accent)}
+.prod .btns{display:flex;flex-direction:column;gap:6px;margin-top:auto}
+.btn{appearance:none;border:1px solid var(--border);background:#1e293b;color:var(--text);border-radius:8px;padding:8px 12px;font-size:13px;font-weight:600;cursor:pointer;text-align:center;text-decoration:none;display:inline-block}
+.btn:hover{border-color:var(--accent);color:var(--accent);text-decoration:none}
 .btn.primary{background:rgba(34,211,238,.15);border-color:rgba(34,211,238,.45);color:var(--accent)}
 .btn.primary:hover{background:rgba(34,211,238,.25)}
+.btn.sbom{background:rgba(249,115,22,.12);border-color:rgba(249,115,22,.4);color:var(--accent2)}
+.btn.sbom:hover{background:rgba(249,115,22,.22);color:var(--accent2)}
 .btn.block{width:100%}
 .kind{font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
 .foot{margin-top:36px;padding-top:18px;border-top:1px solid var(--border);color:var(--muted);font-size:13px}
@@ -231,7 +257,7 @@ code{font-size:12px;color:#e6edf3}
 
   <div class="card">
     <h2>Catalog — configure each image</h2>
-    <p class="hint">Click <strong>Configure</strong> for YAML + Tugconf. Scale, link other services, or add multiple instances of the same product.</p>
+    <p class="hint">Click <strong>Configure</strong> for YAML + Tugconf. Use <strong>Review SBOM</strong> for the CycloneDX bill of materials published with each barge image. Catalog API: <a href="/_tunneltug/hub/sboms">/_tunneltug/hub/sboms</a>.</p>
     <div class="grid" id="prod-grid"></div>
   </div>
 
@@ -362,14 +388,18 @@ code{font-size:12px;color:#e6edf3}
     const el = document.createElement('div');
     el.className = 'prod';
     const port = p.zero_config_port ? ('Zero Config Port: '+p.zero_config_port) : 'Fleet engine';
+    const sbomView = '/_tunneltug/hub/sbom/'+encodeURIComponent(p.repo).replace(/%2F/g,'/')+'/view?tag=latest';
     el.innerHTML =
       '<div class="kind">'+esc(p.kind)+'</div>'+
       '<h3>'+esc(p.display)+'</h3>'+
       '<div class="repo">'+esc(p.repo)+'</div>'+
       '<p>'+esc(p.desc)+'</p>'+
       '<div class="meta">'+esc(port)+'</div>'+
-      '<button type="button" class="btn primary block" data-name="'+esc(p.name)+'">Configure</button>';
-    el.querySelector('button').addEventListener('click', () => openModal(p));
+      '<div class="btns">'+
+        '<button type="button" class="btn primary block cfg-btn" data-name="'+esc(p.name)+'">Configure</button>'+
+        '<a class="btn sbom block" href="'+esc(sbomView)+'" title="CycloneDX software bill of materials">Review SBOM</a>'+
+      '</div>';
+    el.querySelector('.cfg-btn').addEventListener('click', () => openModal(p));
     prodGrid.appendChild(el);
   });
 

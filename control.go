@@ -26,9 +26,27 @@ func (c *quicControlConn) RemoteAddr() net.Addr {
 	return c.conn.RemoteAddr()
 }
 
+const (
+	quicCloseOK             quic.ApplicationErrorCode = 0
+	quicCloseUnauthorized   quic.ApplicationErrorCode = 1
+	quicCloseInvalidControl quic.ApplicationErrorCode = 2
+)
+
 func (c *quicControlConn) Close() error {
+	return c.closeWith(quicCloseOK, "")
+}
+
+func (c *quicControlConn) closeWith(code quic.ApplicationErrorCode, msg string) error {
 	_ = c.Stream.Close()
-	return c.conn.CloseWithError(0, "")
+	return c.conn.CloseWithError(code, msg)
+}
+
+func closeControl(conn net.Conn, code quic.ApplicationErrorCode, msg string) {
+	if qc, ok := conn.(*quicControlConn); ok {
+		_ = qc.closeWith(code, msg)
+		return
+	}
+	_ = conn.Close()
 }
 
 func controlQUICTLSConfig(base *tls.Config) *tls.Config {

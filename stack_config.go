@@ -95,6 +95,9 @@ type BargeProductConfig struct {
 	} `yaml:"host_paths" json:"host_paths"`
 	// HostPort overrides stack hostPort policy for this barge (true = bind node port, false = ClusterIP only).
 	HostPort *bool `yaml:"host_port" json:"host_port"`
+	// HostNetwork runs the pod on the node network namespace (needed for multi-bind
+	// faces: services :80+:443, platform :8443+:53). Prefer over dual systemd.
+	HostNetwork *bool `yaml:"host_network" json:"host_network"`
 	// Args are container command args (appended after image entrypoint). e.g. services: ["--config","/config/services.yaml"]
 	Args []string `yaml:"args" json:"args"`
 	// Disabled skips this barge when true.
@@ -323,6 +326,9 @@ func mergeBargeConfig(base, over BargeProductConfig) BargeProductConfig {
 	if over.HostPort != nil {
 		out.HostPort = over.HostPort
 	}
+	if over.HostNetwork != nil {
+		out.HostNetwork = over.HostNetwork
+	}
 	if len(over.Args) > 0 {
 		out.Args = append([]string(nil), over.Args...)
 	}
@@ -401,6 +407,7 @@ func applyBargeOverrides(base stackApp, cfg BargeProductConfig, defaultTag, hubH
 		}
 	}
 	app.HostPort = cfg.HostPort
+	app.HostNetwork = cfg.HostNetwork
 	if len(cfg.Args) > 0 {
 		app.Args = append([]string(nil), cfg.Args...)
 	}
@@ -521,6 +528,8 @@ func syncStackListenEnv(app *stackApp) {
 		app.Env["MOTIONKB_LISTEN"] = listen
 	case "ack":
 		app.Env["ACK_LISTEN"] = listen
+	case "bandy":
+		app.Env["BANDY_LISTEN"] = listen
 	case "mail":
 		app.Env["MAIL_LISTEN"] = listen
 	case "search":

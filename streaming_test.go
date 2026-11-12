@@ -1,7 +1,9 @@
 package main
 
 import (
+	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 )
@@ -54,5 +56,20 @@ func TestClientBackoff(t *testing.T) {
 	}
 	if clientBackoff(10) != 60*time.Second {
 		t.Fatal("expected capped 60s backoff")
+	}
+}
+
+func TestTunnelCloseHint(t *testing.T) {
+	got := tunnelCloseHint(fmt.Errorf("Application error 0x1 (remote): unauthorized"), time.Millisecond)
+	if !strings.Contains(got, "wrong -token") {
+		t.Fatalf("unauthorized hint = %q", got)
+	}
+	got = tunnelCloseHint(fmt.Errorf("yamux: Failed to read header: Application error 0x0 (remote)"), time.Millisecond)
+	if !strings.Contains(got, "Wrong token") {
+		t.Fatalf("immediate close hint = %q", got)
+	}
+	got = tunnelCloseHint(fmt.Errorf("EOF"), 30*time.Second)
+	if got != "Server disconnected." {
+		t.Fatalf("late close hint = %q", got)
 	}
 }

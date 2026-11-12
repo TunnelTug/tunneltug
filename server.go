@@ -141,13 +141,13 @@ func (m *ServerManager) handleClientConnection(conn net.Conn) {
 	decoder := json.NewDecoder(conn)
 	if err := decoder.Decode(&msg); err != nil {
 		log.Printf("Invalid control message from %s", conn.RemoteAddr())
-		conn.Close()
+		closeControl(conn, quicCloseInvalidControl, "invalid control message")
 		return
 	}
 
 	if !tokensEqual(msg.Token, *authToken) {
 		log.Printf("Unauthorized client attempt from %s", conn.RemoteAddr())
-		conn.Close()
+		closeControl(conn, quicCloseUnauthorized, "unauthorized")
 		return
 	}
 

@@ -42,11 +42,13 @@ func (m *LBManager) handleLBClientConnection(ctx context.Context, clientConn net
 	tee := io.TeeReader(clientConn, &jsonBuf)
 	if err := json.NewDecoder(tee).Decode(&msg); err != nil {
 		log.Printf("Invalid control message from %s", clientConn.RemoteAddr())
+		closeControl(clientConn, quicCloseInvalidControl, "invalid control message")
 		return
 	}
 
 	if !tokensEqual(msg.Token, *authToken) {
 		log.Printf("Unauthorized client attempt from %s", clientConn.RemoteAddr())
+		closeControl(clientConn, quicCloseUnauthorized, "unauthorized")
 		return
 	}
 

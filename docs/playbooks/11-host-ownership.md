@@ -26,21 +26,29 @@ Host `ack.service` had correct UI at `/opt/0trust/ack/ui`. Stack `deploy/ack` ha
 
 ## Ownership matrix (0trust.cloud control-plane host)
 
-Canonical layout when products are co-hosted on the **cloud droplet** with host systemd:
+**Canonical production layout (2026-07 cutover): TunnelTug barges own product ports.**  
+Host systemd product units (`0trust-platform`, `0trust-services`, app units) must be **stopped, disabled, masked**. MOTD aborts if any are active.
 
-| Port | Product / face | **Owner** | Stack replicas |
-|------|----------------|-----------|----------------|
-| 8443 | platform (0trust.cloud) | **systemd** `0trust-platform` | 1 ClusterIP-only OK (no hostPort on platform) |
-| 443/80 | edge ACME + vhosts | **systemd** `0trust-services` | n/a |
-| 3081 | williwaw.app | **systemd** `williwaw` | **0** |
-| 3083 | defcon.chat (ack) | **systemd** `ack` | **0** |
-| 3084 | bandy.chat | **systemd** `bandy` | **0** (if no stack barge) |
-| 3085 | 0trust.social | **systemd** `social` | **0** |
-| 3086 | mesh-mail / mail.0trust | **systemd** `mail` | **0** |
-| 3087 | mesh-search / search | **systemd** `search` | **0** |
-| 3088 | git-mesh.com | **systemd** `gitmesh` | **0** |
-| 8090 | motionkb.com | **systemd** `motionkb` | **0** |
-| 8480/8481 | ultimate_db / keystore | **stack hostPort** OK | ≥1 (no host systemd unit) |
+| Port | Product / face | **Owner** | Stack |
+|------|----------------|-----------|-------|
+| 8443 + 53 | platform (0trust.cloud) | **stack** host_network + host_port | `replicas: 1`, `host_network: true` |
+| 443/80 | edge ACME + vhosts (0trust.services) | **stack** host_network + host_port | `replicas: 1`, `host_network: true`, port 443 |
+| product hostPorts (3081…) | williwaw/ack/social/… | **stack** hostPort (default products policy) | ≥1 when listed in `stack.yaml` |
+| 8480/8481 | ultimate_db / keystore | **stack** hostPort | ≥1 |
+
+Allowed host units only: **`tunneltug-stack`**, k3s, monitoring/hygiene, SSH, HA helpers — **not** product binaries.
+
+**Lab exception only:** dual systemd ownership is documented historically below; do **not** reintroduce on prod cloud.
+
+<details><summary>Legacy matrix (do not use on prod)</summary>
+
+| Port | Owner (legacy) |
+|------|----------------|
+| 8443 | systemd `0trust-platform` + platform ClusterIP-only |
+| 443/80 | systemd `0trust-services` |
+| 308x | host product units with stack `replicas: 0` |
+
+</details>
 
 **Stack may still run** kernel barges (`ultimate_db`, `ultimate_keystore`) and optional ClusterIP-only dogfood with **`host_ports: none`** + stack gateway (`:4070/apps/{name}/`).
 

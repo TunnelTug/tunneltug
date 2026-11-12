@@ -67,6 +67,8 @@ type stackApp struct {
 	HostPaths []stackHostPath
 	// HostPort: nil = use stack policy; true/false overrides.
 	HostPort *bool
+	// HostNetwork: nil/false = cluster net; true = node network (multi-port faces).
+	HostNetwork *bool
 	// Args are container args (image ENTRYPOINT stays; these are CMD/args).
 	Args []string
 }
@@ -114,6 +116,14 @@ func stackCatalog() map[string]stackApp {
 				"ACK_LISTEN": ":3083",
 				"ACK_DB":     "/data/ack.db",
 				"ACK_WAL":    "/data/ack.wal",
+			},
+		},
+		"bandy": {
+			Name: "bandy", Display: "Bandy", Repo: "0trust/bandy", Port: 3084, Component: "general-chat",
+			Env: map[string]string{
+				"BANDY_LISTEN": ":3084",
+				"BANDY_DB":     "/data/bandy.db",
+				"BANDY_WAL":    "/data/bandy.wal",
 			},
 		},
 		"mail": {
@@ -254,6 +264,10 @@ func productLinkEnv(app stackApp, all []stackApp, ns string) map[string]string {
 	case "ack":
 		out["ACK_PUBLIC_URL"] = pub
 		out["ACK_SOCIAL_CDN_URL"] = stackClusterServiceURL("social", all, ns, 3085)
+	case "bandy":
+		out["BANDY_PUBLIC_URL"] = pub
+		out["BANDY_SOCIAL_CDN_URL"] = stackClusterServiceURL("social", all, ns, 3085)
+		out["BANDY_WILLIWAW_URL"] = stackClusterServiceURL("williwaw", all, ns, 3081)
 	case "mail":
 		out["MAIL_PUBLIC_URL"] = pub
 	case "search":
@@ -1163,6 +1177,38 @@ func ensureStackDeployment(ctx context.Context, client kubernetes.Interface, ns 
 			},
 		},
 	}
+	// hostNetwork: multi-bind product faces (platform DNS+HTTPS, services ACME 80/443).
+	if app.HostNetwork != nil && *app.HostNetwork {
+		dep.Spec.Template.Spec.HostNetwork = true
+		dep.Spec.Template.Spec.DNSPolicy = corev1.DNSClusterFirstWithHostNet
+		// Recreate: exclusive host binds (same as hostPort).
+		dep.Spec.Strategy = appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType}
+	}
+	// 0TrustOS images default USER nonroot. Any barge with hostPath (/opt/0trust tree
+	// or durable /data) must run as root: host dirs are root-owned and product DBs
+	// fail with "permission denied" otherwise. Same for hostNetwork privileged ports.
+	needsRoot := (app.HostNetwork != nil && *app.HostNetwork) ||
+		strings.TrimSpace(app.DataHostPath) != "" ||
+		len(app.HostPaths) > 0
+	if needsRoot {
+		root := int64(0)
+		dep.Spec.Template.Spec.SecurityContext = &corev1.PodSecurityContext{
+			RunAsUser:  &root,
+			RunAsGroup: &root,
+			FSGroup:    &root,
+		}
+		if len(dep.Spec.Template.Spec.Containers) > 0 {
+			dep.Spec.Template.Spec.Containers[0].SecurityContext = &corev1.SecurityContext{
+				RunAsUser:                &root,
+				RunAsGroup:               &root,
+				RunAsNonRoot:             boolPtr(false),
+				AllowPrivilegeEscalation: boolPtr(true),
+				Capabilities: &corev1.Capabilities{
+					Add: []corev1.Capability{"NET_BIND_SERVICE", "NET_ADMIN"},
+				},
+			}
+		}
+	}
 	existing, err := client.AppsV1().Deployments(ns).Get(ctx, app.Name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		_, err = client.AppsV1().Deployments(ns).Create(ctx, dep, metav1.CreateOptions{})
@@ -1302,8 +1348,7 @@ func runStackDashboard(ctx context.Context, status *stackStatus) {
 	if *stackGateway {
 		mux.Handle("/apps/", stackAppsGateway(status))
 	}
-	// Webshell: mesh HTTPS + auth_proxy → gonode Junos CLI in 0TrustOS image.
-	mountStackWebshell(mux, status)
+	// Webshell (stack_webshell.go) is disabled: /shell and /shell/ws are not mounted.
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)

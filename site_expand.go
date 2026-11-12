@@ -103,6 +103,15 @@ func ExpandSite(cfg *SiteConfig, popID, baseDir string) (*SiteRunPlan, error) {
 		}
 	}
 
+	sb, err := sandboxForPop(cfg.Sandboxes, plan.PopID)
+	if err != nil {
+		return nil, err
+	}
+	if sb != nil {
+		cloned := cloneSandbox(*sb)
+		plan.Sandbox = &cloned
+	}
+
 	// Materialize stack with kernel node_id/peers injected for this pop.
 	stack, err := materializeSiteStack(cfg, pop, plan)
 	if err != nil {
@@ -111,6 +120,65 @@ func ExpandSite(cfg *SiteConfig, popID, baseDir string) (*SiteRunPlan, error) {
 	plan.Stack = stack
 
 	return plan, nil
+}
+
+// sandboxForPop picks the sandbox for a pop. A sandbox with an empty pop
+// matches a pop that has no sandbox of its own.
+func sandboxForPop(list []SiteSandbox, popID string) (*SiteSandbox, error) {
+	popID = strings.ToLower(strings.TrimSpace(popID))
+	var specific, generic []*SiteSandbox
+	for i := range list {
+		if list[i].Disabled {
+			continue
+		}
+		if list[i].Pop == "" {
+			generic = append(generic, &list[i])
+			continue
+		}
+		if popID == "" || list[i].Pop == popID {
+			specific = append(specific, &list[i])
+		}
+	}
+	if popID == "" {
+		all := append(specific, generic...)
+		if len(all) > 1 {
+			return nil, fmt.Errorf("site has %d sandboxes; pass -pop <id>", len(all))
+		}
+		if len(all) == 1 {
+			return all[0], nil
+		}
+		return nil, nil
+	}
+	if len(specific) > 1 {
+		return nil, fmt.Errorf("pop %s has %d sandboxes", popID, len(specific))
+	}
+	if len(specific) == 1 {
+		return specific[0], nil
+	}
+	if len(generic) > 1 {
+		return nil, fmt.Errorf("pop %s matches %d sandboxes with no pop", popID, len(generic))
+	}
+	if len(generic) == 1 {
+		return generic[0], nil
+	}
+	return nil, nil
+}
+
+func cloneSandbox(s SiteSandbox) SiteSandbox {
+	out := s
+	if len(s.Shares) > 0 {
+		out.Shares = append([]SiteSandboxShare{}, s.Shares...)
+	}
+	if out.MemoryMB == 0 {
+		out.MemoryMB = 12288
+	}
+	if out.DataGB == 0 {
+		out.DataGB = 256
+	}
+	if out.KubePort == 0 {
+		out.KubePort = 16443
+	}
+	return out
 }
 
 func suggestModeFromRoles(roles []string, cfg *SiteConfig) string {
@@ -361,6 +429,22 @@ func FormatSiteRunPlan(plan *SiteRunPlan) string {
 	fmt.Fprintf(&b, "  kernel_ks:\n")
 	fmt.Fprintf(&b, "    node_id: %s\n", emptyDash(plan.KernelKSNodeID))
 	fmt.Fprintf(&b, "    peers:   %s\n", emptyDash(plan.KernelKSPeers))
+	if plan.Sandbox != nil {
+		fmt.Fprintf(&b, "  sandbox:\n")
+		fmt.Fprintf(&b, "    name:       %s\n", emptyDash(plan.Sandbox.Name))
+		fmt.Fprintf(&b, "    pop:        %s\n", emptyDash(plan.Sandbox.Pop))
+		if plan.Sandbox.CPUs > 0 {
+			fmt.Fprintf(&b, "    cpus:       %d\n", plan.Sandbox.CPUs)
+		} else {
+			fmt.Fprintf(&b, "    cpus:       host\n")
+		}
+		fmt.Fprintf(&b, "    memory_mb:  %d\n", plan.Sandbox.MemoryMB)
+		fmt.Fprintf(&b, "    data_gb:    %d\n", plan.Sandbox.DataGB)
+		fmt.Fprintf(&b, "    kube_port:  %d\n", plan.Sandbox.KubePort)
+		fmt.Fprintf(&b, "    shares:     %d\n", len(plan.Sandbox.Shares))
+	} else {
+		fmt.Fprintf(&b, "  sandbox:        (none)\n")
+	}
 	if plan.Stack != nil {
 		n := len(plan.Stack.Barges)
 		if n == 0 {

@@ -24,15 +24,38 @@ const siteKind = "Site"
 
 // SiteConfig is the root document for complex multi-region deployments.
 type SiteConfig struct {
-	APIVersion string             `yaml:"apiVersion" json:"apiVersion"`
-	Kind       string             `yaml:"kind" json:"kind"`
-	Site       SiteMeta           `yaml:"site" json:"site"`
-	Mesh       *SiteMeshBlock     `yaml:"mesh" json:"mesh"`
-	Hub        *SiteHubBlock      `yaml:"hub" json:"hub"`
-	Stack      *StackConfigFile   `yaml:"stack" json:"stack"`
-	KernelMesh *KernelMeshPolicy  `yaml:"kernel_mesh" json:"kernel_mesh"`
-	Pops       []PopConfig        `yaml:"pops" json:"pops"`
-	Process    *ProcessProfile    `yaml:"process" json:"process"`
+	APIVersion string            `yaml:"apiVersion" json:"apiVersion"`
+	Kind       string            `yaml:"kind" json:"kind"`
+	Site       SiteMeta          `yaml:"site" json:"site"`
+	Mesh       *SiteMeshBlock    `yaml:"mesh" json:"mesh"`
+	Hub        *SiteHubBlock     `yaml:"hub" json:"hub"`
+	Stack      *StackConfigFile  `yaml:"stack" json:"stack"`
+	KernelMesh *KernelMeshPolicy `yaml:"kernel_mesh" json:"kernel_mesh"`
+	Pops       []PopConfig       `yaml:"pops" json:"pops"`
+	// Sandboxes are TunnelVM nodes. Each one is the k3s node a pop's stack schedules onto.
+	Sandboxes []SiteSandbox   `yaml:"sandboxes,omitempty" json:"sandboxes,omitempty"`
+	Process   *ProcessProfile `yaml:"process" json:"process"`
+}
+
+// SiteSandbox is one TunnelVM declared in the site document.
+type SiteSandbox struct {
+	Name     string             `yaml:"name" json:"name"`
+	Pop      string             `yaml:"pop,omitempty" json:"pop,omitempty"`
+	CPUs     int                `yaml:"cpus,omitempty" json:"cpus,omitempty"`
+	MemoryMB uint64             `yaml:"memory_mb,omitempty" json:"memory_mb,omitempty"`
+	DataGB   uint32             `yaml:"data_gb,omitempty" json:"data_gb,omitempty"`
+	KubePort int                `yaml:"kube_port,omitempty" json:"kube_port,omitempty"`
+	Home     string             `yaml:"home,omitempty" json:"home,omitempty"`
+	Shares   []SiteSandboxShare `yaml:"shares,omitempty" json:"shares,omitempty"`
+	Disabled bool               `yaml:"disabled,omitempty" json:"disabled,omitempty"`
+}
+
+// SiteSandboxShare is a host directory mounted into the sandbox.
+type SiteSandboxShare struct {
+	Name     string `yaml:"name" json:"name"`
+	Host     string `yaml:"host" json:"host"`
+	Mount    string `yaml:"mount" json:"mount"`
+	ReadOnly bool   `yaml:"read_only,omitempty" json:"read_only,omitempty"`
 }
 
 // SiteMeta is site-wide identity (no hardcoded product domains).
@@ -71,27 +94,27 @@ type KernelMeshPolicy struct {
 
 // PopConfig is one global ingress / region point of presence.
 type PopConfig struct {
-	ID             string         `yaml:"id" json:"id"`
-	Region         string         `yaml:"region" json:"region"`
-	Roles          []string       `yaml:"roles" json:"roles"`
-	Domain         string         `yaml:"domain" json:"domain"`
-	Tunnel         *TunnelBlock   `yaml:"tunnel" json:"tunnel"`
-	Anycast        *FileOrInline  `yaml:"anycast" json:"anycast"`
-	Kernel         *PopKernel     `yaml:"kernel" json:"kernel"`
-	VHosts         *FileOrInline  `yaml:"vhosts" json:"vhosts"`
-	DNS            *FileOrInline  `yaml:"dns" json:"dns"`
+	ID             string           `yaml:"id" json:"id"`
+	Region         string           `yaml:"region" json:"region"`
+	Roles          []string         `yaml:"roles" json:"roles"`
+	Domain         string           `yaml:"domain" json:"domain"`
+	Tunnel         *TunnelBlock     `yaml:"tunnel" json:"tunnel"`
+	Anycast        *FileOrInline    `yaml:"anycast" json:"anycast"`
+	Kernel         *PopKernel       `yaml:"kernel" json:"kernel"`
+	VHosts         *FileOrInline    `yaml:"vhosts" json:"vhosts"`
+	DNS            *FileOrInline    `yaml:"dns" json:"dns"`
 	StackOverrides *StackConfigFile `yaml:"stack_overrides" json:"stack_overrides"`
 }
 
 // TunnelBlock is per-PoP tunnel/LB/barge engine settings.
 type TunnelBlock struct {
-	Public  string      `yaml:"public" json:"public"`
-	Control string      `yaml:"control" json:"control"`
-	Prod    bool        `yaml:"prod" json:"prod"`
-	Dev     bool        `yaml:"dev" json:"dev"`
-	Email   string      `yaml:"email" json:"email"`
-	Routing string      `yaml:"routing" json:"routing"`
-	LB      *PopLBBlock `yaml:"lb" json:"lb"`
+	Public  string         `yaml:"public" json:"public"`
+	Control string         `yaml:"control" json:"control"`
+	Prod    bool           `yaml:"prod" json:"prod"`
+	Dev     bool           `yaml:"dev" json:"dev"`
+	Email   string         `yaml:"email" json:"email"`
+	Routing string         `yaml:"routing" json:"routing"`
+	LB      *PopLBBlock    `yaml:"lb" json:"lb"`
 	Barge   *PopBargeBlock `yaml:"barge" json:"barge"`
 }
 
@@ -142,29 +165,30 @@ type FileOrInline struct {
 
 // SiteRunPlan is the expanded, PoP-selected plan ready to apply or print.
 type SiteRunPlan struct {
-	PopID            string
-	Roles            []string
-	Domain           string
-	PublicScheme     string
-	Stack            *StackConfigFile
-	StackPath        string // written temp path when applied
-	AnycastPath      string
-	VHostsPath       string
-	DNSPath          string
-	KernelDBPeers    string
-	KernelKSPeers    string
-	KernelDBNodeID   string
-	KernelKSNodeID   string
-	UDBListen        string
-	UKSListen        string
-	UDBDataDir       string
-	UKSDataDir       string
-	SuggestedMode    string
-	Mesh             *SiteMeshBlock
-	Hub              *SiteHubBlock
-	Tunnel           *TunnelBlock
-	TokenEnv         string
-	BaseDir          string
+	PopID          string
+	Roles          []string
+	Domain         string
+	PublicScheme   string
+	Stack          *StackConfigFile
+	StackPath      string // written temp path when applied
+	AnycastPath    string
+	VHostsPath     string
+	DNSPath        string
+	KernelDBPeers  string
+	KernelKSPeers  string
+	KernelDBNodeID string
+	KernelKSNodeID string
+	UDBListen      string
+	UKSListen      string
+	UDBDataDir     string
+	UKSDataDir     string
+	SuggestedMode  string
+	Mesh           *SiteMeshBlock
+	Hub            *SiteHubBlock
+	Tunnel         *TunnelBlock
+	Sandbox        *SiteSandbox
+	TokenEnv       string
+	BaseDir        string
 }
 
 // loadSiteConfigFile loads YAML/JSON site config (not .tug — use loadSiteAny).
@@ -267,6 +291,19 @@ func normalizeSiteConfig(cfg *SiteConfig) error {
 			cfg.Pops[i].Roles[j] = strings.ToLower(strings.TrimSpace(r))
 		}
 	}
+	names := map[string]bool{}
+	for i := range cfg.Sandboxes {
+		name := strings.TrimSpace(cfg.Sandboxes[i].Name)
+		if name == "" {
+			return fmt.Errorf("sandboxes[%d]: name is required", i)
+		}
+		if names[name] {
+			return fmt.Errorf("duplicate sandbox %q", name)
+		}
+		names[name] = true
+		cfg.Sandboxes[i].Name = name
+		cfg.Sandboxes[i].Pop = strings.ToLower(strings.TrimSpace(cfg.Sandboxes[i].Pop))
+	}
 	return nil
 }
 
@@ -289,6 +326,37 @@ func validateSiteConfig(cfg *SiteConfig) error {
 		}
 		if !found {
 			return fmt.Errorf("kernel_mesh.hub_pop %q not in pops", hub)
+		}
+	}
+	popIDs := map[string]bool{}
+	for _, p := range cfg.Pops {
+		popIDs[p.ID] = true
+	}
+	for i, sb := range cfg.Sandboxes {
+		if sb.CPUs < 0 {
+			return fmt.Errorf("sandboxes[%d] %s: cpus must be >= 0", i, sb.Name)
+		}
+		if sb.MemoryMB != 0 && sb.MemoryMB < 512 {
+			return fmt.Errorf("sandboxes[%d] %s: memory_mb %d is below 512", i, sb.Name, sb.MemoryMB)
+		}
+		if sb.KubePort != 0 && (sb.KubePort < 1 || sb.KubePort > 65535) {
+			return fmt.Errorf("sandboxes[%d] %s: kube_port %d is out of range", i, sb.Name, sb.KubePort)
+		}
+		if sb.Pop != "" && len(cfg.Pops) > 0 && !popIDs[sb.Pop] {
+			return fmt.Errorf("sandboxes[%d] %s: pop %q is not in pops", i, sb.Name, sb.Pop)
+		}
+		seenShare := map[string]bool{}
+		for j, sh := range sb.Shares {
+			if strings.TrimSpace(sh.Name) == "" || strings.TrimSpace(sh.Host) == "" {
+				return fmt.Errorf("sandboxes[%d] %s: shares[%d] needs name and host", i, sb.Name, j)
+			}
+			if !strings.HasPrefix(sh.Mount, "/") {
+				return fmt.Errorf("sandboxes[%d] %s: share %s mount must be absolute", i, sb.Name, sh.Name)
+			}
+			if seenShare[sh.Name] {
+				return fmt.Errorf("sandboxes[%d] %s: duplicate share %q", i, sb.Name, sh.Name)
+			}
+			seenShare[sh.Name] = true
 		}
 	}
 	return nil

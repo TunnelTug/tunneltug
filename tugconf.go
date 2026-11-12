@@ -23,6 +23,7 @@ import (
 //
 //	set pop sfo domain sfo.example.com
 //	set stack barge williwaw replicas 2
+//	set sandbox sandbox pop sfo
 //	set kernel-mesh mode full-mesh
 //
 // Compiles to the same SiteConfig IR as YAML.
@@ -247,6 +248,9 @@ func treeSet(tree map[string]any, path []string, val any) error {
 	if len(path) >= 2 && path[0] == "pop" {
 		return setKeyedList(tree, "pops", "id", path[1], path[2:], val)
 	}
+	if len(path) >= 2 && path[0] == "sandbox" {
+		return setSandboxPath(tree, path[1], path[2:], val)
+	}
 	if len(path) >= 3 && path[0] == "stack" && (path[1] == "barge" || path[1] == "product") {
 		return setKeyedList(tree, "stack.barges", "name", path[2], path[3:], val)
 	}
@@ -285,10 +289,56 @@ func normalizeTugPath(path []string) []string {
 			p = "ultimate_keystore"
 		case "stack-overrides":
 			p = "stack_overrides"
+		case "memory-mb":
+			p = "memory_mb"
+		case "data-gb":
+			p = "data_gb"
+		case "kube-port":
+			p = "kube_port"
+		case "read-only":
+			p = "read_only"
 		}
 		out[i] = p
 	}
 	return out
+}
+
+func setSandboxPath(tree map[string]any, name string, rest []string, val any) error {
+	if len(rest) >= 2 && rest[0] == "shares" {
+		if err := setKeyedList(tree, "sandboxes", "name", name, []string{"name"}, name); err != nil {
+			return err
+		}
+		entry, err := keyedEntry(tree, "sandboxes", "name", name)
+		if err != nil || entry == nil {
+			if err != nil {
+				return err
+			}
+			return fmt.Errorf("sandbox %s not found", name)
+		}
+		return setKeyedList(entry, "shares", "name", rest[1], rest[2:], val)
+	}
+	return setKeyedList(tree, "sandboxes", "name", name, rest, val)
+}
+
+func keyedEntry(tree map[string]any, listKey, keyField, key string) (map[string]any, error) {
+	raw, ok := tree[listKey]
+	if !ok {
+		return nil, nil
+	}
+	list, ok := raw.([]any)
+	if !ok {
+		return nil, fmt.Errorf("%s is not a list", listKey)
+	}
+	for _, item := range list {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if strings.EqualFold(fmt.Sprint(m[keyField]), key) {
+			return m, nil
+		}
+	}
+	return nil, nil
 }
 
 func setKeyedList(tree map[string]any, listPath, keyField, key string, rest []string, val any) error {
@@ -411,6 +461,16 @@ func treeDelete(tree map[string]any, path []string) error {
 	}
 	if len(path) >= 2 && path[0] == "pop" {
 		return deleteKeyed(tree, "pops", "id", path[1], path[2:])
+	}
+	if len(path) >= 2 && path[0] == "sandbox" {
+		if len(path) >= 4 && path[2] == "shares" {
+			entry, err := keyedEntry(tree, "sandboxes", "name", path[1])
+			if err != nil || entry == nil {
+				return err
+			}
+			return deleteKeyed(entry, "shares", "name", path[3], path[4:])
+		}
+		return deleteKeyed(tree, "sandboxes", "name", path[1], path[2:])
 	}
 	cur := tree
 	for i := 0; i < len(path)-1; i++ {
@@ -554,6 +614,8 @@ func emitSetLines(prefix string, v any, lines *[]string) {
 					head := prefix
 					if strings.HasSuffix(prefix, "pops") || prefix == "pops" {
 						head = "pop " + key
+					} else if strings.HasSuffix(prefix, "sandboxes") || prefix == "sandboxes" {
+						head = "sandbox " + key
 					} else if strings.Contains(prefix, "barges") || strings.HasSuffix(prefix, "products") {
 						head = "stack barge " + key
 					} else {

@@ -14,9 +14,10 @@ Written so public TLS, fleets, hub, and stack work are done **only** through the
 | [06-mesh-vpi-dns.md](06-mesh-vpi-dns.md) | Built-in mesh, VPI stub, `-dns` zones |
 | [07-anycast.md](07-anycast.md) | `-mode anycast` / `-anycast` sidecar, BGPsec |
 | [08-kernel-replication.md](08-kernel-replication.md) | `ultimate_db` / `ultimate_keystore` barges |
-| [09-site-config.md](09-site-config.md) | Site YAML / Tugconf multi-PoP |
+| [09-site-config.md](09-site-config.md) | Site YAML / Tugconf multi-PoP and sandbox |
 | [10-diagnostics.md](10-diagnostics.md) | Safe checks (what to curl, what not to) |
 | [11-host-ownership.md](11-host-ownership.md) | **systemd vs stack hostPort** — one owner per port (defcon.chat post-mortem) |
+| [12-vm-runtime.md](12-vm-runtime.md) | **TunnelTug owns the VM** — HCS VM from WSL parts, tug-init, k3s node, `tunneltug vm` |
 
 Related design docs: [ARCHITECTURES.md](../ARCHITECTURES.md), root [README.md](../../README.md), [deploy/hub/README.md](../../deploy/hub/README.md), [deploy/k3s/README.md](../../deploy/k3s/README.md).
 

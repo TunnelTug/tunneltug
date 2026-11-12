@@ -7,10 +7,14 @@ COMMIT   ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
 DATE     ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown)
 LDFLAGS  := -s -w -X main.Version=$(VERSION) -X main.Commit=$(COMMIT) -X main.BuildDate=$(DATE)
 
-.PHONY: build test vet lint clean docker run-server run-client
+.PHONY: build vm-guest test vet lint clean docker run-server run-client
 
-build:
+build: vm-guest
 	go build -ldflags "$(LDFLAGS)" -o bin/$(BINARY) .
+
+# Linux guest agent for the TunnelTug VM runtime (PID 1 of the VM), embedded by vm_image.go.
+vm-guest:
+	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags "-s -w" -o vmguest/tug-init ./cmd/tug-init
 
 test:
 	go test ./... -count=1 -race -timeout 2m

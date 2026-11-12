@@ -12,10 +12,15 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"os"
 	"strings"
 )
 
 func main() {
+	// Docker-like verbs (tunneltug vm up, tunneltug run …) own their own flags.
+	if len(os.Args) > 1 && isRuntimeVerb(os.Args[1]) {
+		os.Exit(runRuntimeCLI(os.Args[1], os.Args[2:]))
+	}
 	flag.Parse()
 
 	if *showVersion {
